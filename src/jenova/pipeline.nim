@@ -102,6 +102,33 @@ proc lastUserIndex(messages: JsonNode): int =
     if m.kind == JObject and m.hasKey("role") and m["role"].getStr == "user":
       return i
 
+## Function purpose: a turn's words, whichever shape its content took. A turn
+## carrying an attachment sends an OpenAI content *array* rather than a string,
+## and `getStr` answers empty for one — which silently skipped intent detection,
+## retrieval and the persona for exactly the turns that carry a file.
+proc userText*(content: JsonNode): string =
+  if content.isNil: return ""
+  case content.kind
+  of JString:
+    content.getStr
+  of JArray:
+    var parts: seq[string]
+    for p in content:
+      if p.kind == JObject and p{"type"}.getStr("") == "text":
+        parts.add p{"text"}.getStr("")
+    parts.join("\n")
+  else:
+    ""
+
+## Function purpose: where a prefix strip has to be written back on an array
+## turn. Assigning a string over the array would drop every attachment with it,
+## and the prefix only ever sits at the head of the first text part.
+proc firstTextPart(content: JsonNode): JsonNode =
+  if content.isNil or content.kind != JArray: return nil
+  for p in content:
+    if p.kind == JObject and p{"type"}.getStr("") == "text": return p
+  nil
+
 ## Function purpose: the prefix is stripped because it is addressed to this
 ## program and not to the model, which would otherwise answer about the marker.
 proc detectIntent*(text: string): tuple[intent: Intent, stripped: string] =
@@ -345,12 +372,22 @@ proc prepare*(rawBody: string, projectRoot = ""): Prepared =
   let idx = lastUserIndex(messages)
   if idx < 0: return
 
-  var lastUser = messages[idx]{"content"}.getStr
+  let content = messages[idx]{"content"}
+  var lastUser = userText(content)
   let (intent, stripped) = detectIntent(lastUser)
   result.intent = intent
   if stripped != lastUser:
+    # Action purpose: the array form is edited in place, one part deep. The
+    # prefix is at the head of the turn and `userText` joins the text parts in
+    # order, so it is at the head of the first of them; replacing the whole
+    # content with a string would send the attachments nowhere.
+    if content.kind == JArray:
+      let part = firstTextPart(content)
+      if part != nil:
+        part["text"] = %detectIntent(part{"text"}.getStr("")).stripped
+    else:
+      messages[idx]["content"] = %stripped
     lastUser = stripped
-    messages[idx]["content"] = %lastUser
 
   result.hadTools = req.hasKey("tools") and req["tools"].kind == JArray and
                     req["tools"].len > 0

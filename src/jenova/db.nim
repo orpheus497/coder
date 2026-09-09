@@ -242,7 +242,15 @@ proc queryBlob*(sql: string, params: varargs[string]):
   let nCols = sqlite3_column_count(s)
   while true:
     let rc = sqlite3_step(s)
-    if rc != SQLITE_ROW: break
+    # Action purpose: the same three-way test `query` makes, and it was a
+    # two-way one. Anything that is not a row and not the end is an error, and
+    # breaking on it returned the rows collected so far as though the result set
+    # had ended — so a locked or failing database degraded the retrieval scan
+    # this feeds, silently and without changing a single ranking visibly.
+    if rc == SQLITE_DONE: break
+    if rc != SQLITE_ROW:
+      raise newException(DbError, "queryBlob failed: " & $sqlite3_errmsg(c.h) &
+                         " [" & sql & "]")
     var cols: seq[string]
     for i in 0 ..< nCols - 1:
       let t = sqlite3_column_text(s, i.cint)

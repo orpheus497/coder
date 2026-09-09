@@ -53,6 +53,14 @@ proc classify*(path: string): RouteClass =
     rcDebug
   elif path.startsWith("/api/"):
     rcApi
+  # Action purpose: tested before the `/v1/` prefix below, which would otherwise
+  # claim `/v1/embeddings` for the completion class and relay it to the chat
+  # backend — the OpenAI spelling of the one route that must reach the embedding
+  # server. Retrieval is unaffected either way, since `rag.embed` calls that port
+  # directly rather than through this server.
+  elif path.startsWith("/embed") or path.startsWith("/embeddings") or
+       path.startsWith("/v1/embeddings"):
+    rcEmbed
   # Action purpose: `/infill` is llama.cpp's fill-in-the-middle endpoint, which
   # the editor integration depends on. It is forwarded verbatim, so classifying
   # it into this pool is the whole of the requirement.
@@ -61,8 +69,6 @@ proc classify*(path: string): RouteClass =
        path.startsWith("/chat") or path.startsWith("/props") or
        path.startsWith("/slots"):
     rcCompletion
-  elif path.startsWith("/embed") or path.startsWith("/embeddings"):
-    rcEmbed
   else:
     rcStatic
 

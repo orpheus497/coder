@@ -188,12 +188,18 @@ for right-click on messages and tree rows · `SplitButton` for send-with-options
 
 **Exit:** the three list surfaces are native. Four Class B gaps and one Class A gap close.
 
-> **State: 5.2 and 5.3 done.** P-B6 — Files and Trash — landed as `ColumnView`s, except that the
-> trash stays a plain list on purpose (report 06 §3: it holds two lists of different kinds, and
-> presenting them as one would be a false claim about what restoring one does). P-A8 landed as
-> `src/jenova/assetview.nim` plus `openAsset` (`gui.nim:4088`). Header-click sorting is not
-> wire-able: owlkettle binds no `GtkSorter` at `ac61ecf` (report 07, V-13). **5.1 and 5.4 are
-> open.**
+> **State: 5.1, 5.2 and 5.3 done; 5.4 open.** P-B6 — Files and Trash — landed as `ColumnView`s,
+> except that the trash stays a plain list on purpose (report 06 §3: it holds two lists of
+> different kinds, and presenting them as one would be a false claim about what restoring one
+> does). P-A8 landed as `src/jenova/assetview.nim` plus `openAsset`. Header-click sorting is not
+> wire-able: owlkettle binds no `GtkSorter` at `ac61ecf` (report 07, V-13).
+>
+> **5.1 was recorded open for longer than it was open, and report 06 §4 had it right the whole
+> time.** The settings screen is built on `PreferencesGroup`, `ActionRow`, `ComboRow` and
+> `SwitchRow` — `settingsField` and `settingsPanel` in `gui.nim`. `EntryRow` is deliberately not
+> used and `settingsField` states the reason: it derives from `AdwPreferencesRow`, so it carries
+> no `subtitle`, and in this panel the help text is the point. **What actually remains of 5.1 is
+> P-B7 alone** — model information detail as an `ExpanderRow`.
 
 ---
 
@@ -225,13 +231,20 @@ also unblocks `autoMicOnEmpty`, the last pending setting).
 
 **P-A5 needs a decision before starting** — see Open decisions.
 
-> **State: P-B4 done; P-A5 largely done; P-A7 and P-A3 open.** The P-A5 decision was taken
-> (open decision 1) and three of its four phases have shipped: `markdown.nim`'s inline pass,
-> `mathtex.nim`'s parser and box layout, and `mathfont.nim`'s font probe. **What is left in this
-> phase is M-3's Cairo draw** — `renderMath` has exactly one caller and it is the self-test, so
-> display maths is laid out and not painted — plus M-4's polish. P-A7 still has no rasteriser, so
-> `pdfAsImage` is still pending, and P-A3 still has no recorder, so `autoMicOnEmpty` is too;
-> both settings now name those blockers rather than the shipped one.
+> **State: P-B4 done; P-A5's inline tier shipped; P-A7 and P-A3 open.** The P-A5 decision was
+> taken (open decision 1). M-1 is in the product: `markdown.nim`'s inline pass renders Greek,
+> operator names and `^`/`_` inside the existing text block, on the path every reply takes.
+>
+> **M-2 and M-3's font half are written and are not in the product, which this row and report 02
+> both described as "laid out and not painted".** That is too generous by a link step.
+> `gui.nim` imports neither `mathtex` nor `mathfont` — they appear nowhere in its import list —
+> and `markdown.BlockKind` is still `bkText, bkCode, bkTable` with no `bkMath`. So 1,861 lines of
+> parser, box layout, font probe and MATH-table reader are reachable only from `jenova_core.nim`'s
+> self-tests. What remains is not a draw call on wired-up modules: it is the import, the fourth
+> block kind, the branch that builds it, **and then** the Cairo draw, plus M-4.
+>
+> P-A7 still has no rasteriser, so `pdfAsImage` is still pending, and P-A3 still has no recorder,
+> so `autoMicOnEmpty` is too; both settings now name those blockers rather than the shipped one.
 
 ---
 

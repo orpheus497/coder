@@ -56,7 +56,7 @@
 ## which can; the preference is a runtime one, the same shape as `fetch(1)`
 ## before `curl`.
 
-import std/[os, strutils]
+import std/[os, strutils, tables]
 import ./pkgconfig
 # For `MathConstants`, which this module fills in rather than mirroring. No
 # cycle: `mathtex` imports only `std`, which is what keeps it assertable
@@ -425,16 +425,29 @@ proc chooseFont*(): tuple[found: bool, font: MathFont] =
     # substitution problem in another costume.
     return (false, MathFont(path: override, family: "unusable override"))
 
+  # Action purpose: one walk per root, not one per candidate per root. The roots
+  # are system font trees of many thousands of files, and six candidates over
+  # five roots walked them thirty times to answer a question one pass over each
+  # answers. The basenames are collected first and the preference order is
+  # applied afterwards, so which font wins is unchanged.
+  # Every copy is kept, in root order, because an unusable one must not stop a
+  # second copy of the same file in a later root from being tried.
+  var found: Table[string, seq[string]]
+  for root in FontRoots:
+    if not dirExists(root): continue
+    for path in walkDirRec(root):
+      let name = path.extractFilename
+      if found.hasKey(name): found[name].add path
+      else: found[name] = @[path]
+
   for (family, filename) in FontCandidates:
-    for root in FontRoots:
-      if not dirExists(root): continue
-      for path in walkDirRec(root):
-        if path.extractFilename != filename: continue
-        var f = openFont(path)
-        if f.usable():
-          f.family = family
-          return (true, f)
-        f.close()
+    if not found.hasKey(filename): continue
+    for path in found[filename]:
+      var f = openFont(path)
+      if f.usable():
+        f.family = family
+        return (true, f)
+      f.close()
   (false, MathFont())
 
 ## Function purpose: read every constant the layout consumes, once.

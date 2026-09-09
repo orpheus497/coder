@@ -38,7 +38,7 @@ import jenova/[paths, config, db, dbselftest, server, serverselftest, markdown,
                rag, sha256, pipeline, prompts, lifecycle, models, nvimctl, api,
                settings, hardware, workspace, pdf, zlib, fssync, composer, convmd,
                assetview, http, upstream, websearch, version, inspect, mathtex,
-               mathfont]
+               mathfont, routes]
 
 const
   Version = version.Version
@@ -76,7 +76,8 @@ proc usage() =
   echo "              attach-selftest, workspace-selftest, nvim-env-selftest,"
   echo "              models-selftest, fs-selftest, composer-selftest,"
   echo "              convmd-selftest, asset-selftest, lifecycle-selftest,"
-  echo "              relay-selftest, inspect-selftest, math-selftest"
+  echo "              relay-selftest, inspect-selftest, math-selftest,"
+  echo "              routes-selftest"
   echo ""
   echo "Precedence: builtin default < etc/jenova.conf < etc/jenova.local.conf < environment"
   echo "JENOVA_NO_BACKENDS=1  serve without starting llama-server (used by the tests)"
@@ -2711,6 +2712,36 @@ proc main() =
         check("no second system message is inserted",
               parsed["messages"].len == 2)
 
+      # Action purpose: the block this builds is appended to the system message,
+      # and `pipeline.trimHistory` never drops one — so an unbounded block made
+      # every turn discard the whole conversation and still exceed the context,
+      # with the trim counted against a history that was not the cause. The
+      # budget is a parameter so the property can be asserted without a fixture
+      # large enough to matter at the shipped ceiling.
+      block theContextIsBounded:
+        db.exec("DELETE FROM notes WHERE id='wst-big'", [])
+        addNote("wst-big", "Huge", repeat("x", 20_000), "wst-fA1", "", "", 0)
+
+        let small = workspace.contextFor("wst-fA1", "", "", maxBytes = 2_000)
+        check("an artefact over the budget is not emitted",
+              "xxxxxxxxxx" notin small)
+        # Skipped and counted, never shortened: a truncated note reads as a
+        # whole one and is answered as though it were.
+        check("...and the block says it left one out",
+              "omitted to fit the context budget" in small, small)
+        check("the block stays within its budget and its headings",
+              small.len < 2_500, $small.len)
+        # A FOCUS note is a rule and the rest is material, so the budget is spent
+        # in that order — a workspace whose notes overflow still answers under
+        # its own rules.
+        check("a FOCUS rule survives a budget its notes exhaust",
+              "always use tabs" in small, small)
+
+        let full = workspace.contextFor("wst-fA1", "", "")
+        check("the same artefact is emitted under the shipped ceiling",
+              "xxxxxxxxxx" in full)
+        db.exec("DELETE FROM notes WHERE id='wst-big'", [])
+
       # Action purpose: every block above supplies its own rows
       # with raw SQL, so not one of them could see that saving a note through
       # the window's own write path blanked `isFocusNote` and silently demoted
@@ -5076,6 +5107,74 @@ proc main() =
       echo ""
       echo "asset-selftest: FAIL (", bad, ")"
       quit(1)
+    of "routes-selftest":
+      # Action purpose: `classify` is pure, and the only assertions on it lived
+      # in `serve-selftest` and `tests/test_routes.sh` — both of which bind a
+      # port. So the routing table could only be checked by standing a server
+      # up, which is why `/v1/embeddings` reached the chat backend for as long
+      # as it did: prefix order is decidable with no socket at all, and nothing
+      # decidable that way was checking it.
+      var bad = 0
+      proc check(label: string, cond: bool, detail = "") =
+        if cond: echo "  ok   ", label
+        else:
+          echo "  FAIL ", label, (if detail.len > 0: "\n       " & detail else: "")
+          inc bad
+
+      echo "routes-selftest"
+
+      block embeddingsReachTheEmbedder:
+        # The OpenAI spelling shares its prefix with every completion route, so
+        # the order of the two tests is the whole of the behaviour.
+        check("/v1/embeddings is an embed route",
+              routes.classify("/v1/embeddings") == rcEmbed,
+              $routes.classify("/v1/embeddings"))
+        check("the unversioned spellings still are",
+              routes.classify("/embeddings") == rcEmbed and
+              routes.classify("/embed") == rcEmbed)
+
+      block completionsAreUnaffected:
+        for path in ["/v1/chat/completions", "/v1/completions", "/v1/models",
+                     "/completion", "/infill", "/chat", "/props", "/slots"]:
+          check(path & " is a completion route",
+                routes.classify(path) == rcCompletion, $routes.classify(path))
+
+      block healthOutranksTheV1Prefix:
+        # Tested before `/v1/`, or the completion handler parses a JSON body a
+        # GET does not carry and answers 400 to a liveness probe.
+        check("/health is a health route",
+              routes.classify("/health") == rcHealth)
+        check("/v1/health is one too",
+              routes.classify("/v1/health") == rcHealth)
+
+      block everythingElse:
+        check("/api/db/notes is an api route",
+              routes.classify("/api/db/notes") == rcApi)
+        check("/debug/stream is a debug route",
+              routes.classify("/debug/stream") == rcDebug)
+        # There is no catch-all relay: an unmatched path is served from
+        # `public/` or answered 404, and the two routes the frozen Web UI calls
+        # and this server does not implement fall here rather than upstream.
+        check("an unmatched path falls to static",
+              routes.classify("/index.html") == rcStatic)
+        check("/models/load is not relayed",
+              routes.classify("/models/load") == rcStatic)
+        check("/cors-proxy is not relayed",
+              routes.classify("/cors-proxy") == rcStatic)
+
+      block aPartialRequestLineIsNotAPath:
+        # The acceptor peeks rather than reads, so an incomplete line must
+        # answer empty and be waited on rather than routed on a guess.
+        check("a request line with no terminator yields nothing",
+              routes.pathFromHead("GET /v1/chat") == "")
+        check("a complete one yields the target",
+              routes.pathFromHead("GET /v1/chat HTTP/1.1\r\n") == "/v1/chat")
+
+      if bad == 0:
+        echo "routes-selftest: PASS"
+        quit(0)
+      echo "routes-selftest: FAIL (", bad, ")"
+      quit(1)
     of "pipeline-selftest":
       # Proves the pipeline's seven behaviours against a scratch database. Web
       # search is exercised only for its formatting, not by making a request.
@@ -5165,6 +5264,35 @@ proc main() =
         check("no intent falls back to the freechat persona",
               body["messages"][0]["content"].getStr.contains("autonomous agent"))
         check("no intent is reported as inNone", r.intent == inNone)
+
+      # Action purpose: a turn carrying an attachment sends an OpenAI content
+      # *array* rather than a string, and `getStr` answers empty for one — so
+      # every enrichment here sat behind a length test no such turn could pass.
+      # The persona, the intent and the retrieval were all skipped for exactly
+      # the turns that carry a file, on both surfaces.
+      block attachmentTurnsAreStillPrepared:
+        let body = """{"messages":[{"role":"user","content":[""" &
+          """{"type":"text","text":"Visual Rewrite: tidy this"},""" &
+          """{"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}}""" &
+          """]}]}"""
+        let r = pipeline.prepare(body)
+        check("an intent prefix is detected through a content array",
+              r.intent == inVisual)
+        let parsed = parseJson(r.body)
+        check("an attachment turn still gets a system message",
+              parsed["messages"][0]{"role"}.getStr == "system", r.body)
+        check("...and it carries the intent's own persona",
+              parsed["messages"][0]["content"].getStr.contains(
+                "inline rewrite mode"))
+        let parts = parsed["messages"][^1]["content"]
+        check("the content is still an array", parts.kind == JArray, $parts.kind)
+        check("the prefix is stripped from the text part",
+              not parts[0]["text"].getStr.contains("Visual Rewrite:"),
+              parts[0]["text"].getStr)
+        # The one that matters: assigning the stripped string over the content
+        # would strip the attachment with the prefix.
+        check("and the image part survives the strip",
+              parts.len == 2 and parts[1]{"type"}.getStr == "image_url", $parts)
 
       # Action purpose: the chain the inspector reads, with the sockets taken
       # out — the pipeline's own measurements, through the header builder

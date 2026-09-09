@@ -1,6 +1,6 @@
 # BRIEFING
 
-**Current as of 2026-09-09 14:49.** Overwritten each session.
+**Current as of 2026-09-09T05:14Z.** Overwritten each session.
 
 `AGENTS.md` is restored to the repository root, byte-identical to the version deleted in
 `c5111ce3`. It is untracked until committed.

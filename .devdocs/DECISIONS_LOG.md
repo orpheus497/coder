@@ -4,7 +4,7 @@ Architectural and structural decisions, and ambiguities resolved. Newest first.
 
 ---
 
-## 2026-09-09 14:24 — the FreeBSD "blocked" framing is retired
+## 2026-09-09T04:24Z — the FreeBSD "blocked" framing is retired
 
 Report 05 Phase 1 and report 01 A-2 both record their remaining work as blocked on a
 FreeBSD host with the GUI built. That was true of the container the audits ran in; it is
@@ -15,7 +15,7 @@ The `sysctl` probe, the `fork`/`setsid`/`execv` path, the D-Bus tray, the Neovim
 GTK 4.20.4 and the GUI screenshots are therefore outstanding work rather than blocked
 work, and are recorded in `TODOS.md` as such.
 
-## 2026-09-09 14:24 — the `.devdocs/` trackers are created rather than assumed absent
+## 2026-09-09T04:24Z — the `.devdocs/` trackers are created rather than assumed absent
 
 `AGENTS.md` mandates eleven trackers under `.devdocs/`; none existed, and `AGENTS.md`
 itself is absent from the tree (deleted in `c5111ce3`). Report 03 records that the
@@ -27,7 +27,7 @@ written without cross-reference labels — the defect was the labels and their r
 source comments, not the existence of a task ledger. `AGENTS.md` is read from git history
 until it is restored to the tree.
 
-## 2026-09-09 14:24 — six audit defects split into five executed and two held
+## 2026-09-09T04:24Z — six audit defects split into five executed and two held
 
 Nine defects were found by reading `src/` against the audit reports. Five are unambiguous
 repairs of code that does not do what its own module says it does, and are executed:
@@ -49,7 +49,7 @@ Two are held for a ruling because they change a contract rather than repair a de
   Recommended: move the merge into `upsert`, since a blanked `content` column destroys
   stored bytes.
 
-## 2026-09-09 14:24 — the workspace context is bounded at its source, not at the trimmer
+## 2026-09-09T04:24Z — the workspace context is bounded at its source, not at the trimmer
 
 `workspace.contextFor` has no token budget and its output enters the system message,
 which `pipeline.trimHistory` deliberately never drops. Teaching the trimmer to drop or

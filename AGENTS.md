@@ -47,13 +47,15 @@ The "Dependency added/removed/changed" row governs a dependency shift discovered
 
 ## CODE DOCUMENTATION STANDARDS
 
-For new public/exported functions going forward (not retroactive — do not mass-edit existing files solely to add these): write one comment line directly above the function, in the language's native comment syntax, explaining *why* it exists and how it's used. No exact prefix or tag is required — write it as a normal comment. Do not add comments that just restate the function name/signature.
+**Scope — new and touched code only.** These rules govern code you write, and code you are already editing for another reason. **Do not mass-edit existing files solely to add or reformat comments**, and do not add commenting retroactively unless the user explicitly asks for it. An existing file that does not meet this standard is not thereby a defect to fix.
 
-Documentation is only necessary where the code is not self-explanatory, all files must meet this standard; DO NOT retroactively add commenting unless explicitly requested by the user. Use the following exact prefixes directly above the relevant code blocks, using the native comment syntax of the language (e.g., `//`, `#`, or `##`), to ensure immediate legibility. For shell scripts, place the comment directly beneath the shebang:
+**Format — the prefixes are required**, written in the language's native comment syntax (`//`, `#`, `##`). For shell scripts, place the file-level comment directly beneath the shebang.
 
-* `Script function and purpose:` [What this script does] - Top of every script/source.
-* `Function purpose:` [Why this function exists and how it is used] - Before standalone functions.
-* `Action purpose:` [Why this logic is being used and an explanation of how it is supposed to work] - Before highly specific actions/commands.
+* `Script function and purpose:` [what this file is for, and its place in the system] — at the top of a source file **you create**.
+* `Function purpose:` [why it exists and how it is used] — **required above every new public/exported function**, and above a private one whose purpose the body does not make obvious. An FFI declaration gets none; its enclosing `{.push .}` block gets one `Action purpose:` naming the library.
+* `Action purpose:` [why this logic, and how it is meant to work] — above a block that is genuinely not self-explanatory: a workaround for external behaviour, an ordering constraint, a non-obvious invariant, a deliberate omission.
+
+**Comment only what the code cannot say for itself.** Do not restate a name, a signature, or the statement below it. The test: if the sentence stays true when the function is renamed to `doThing`, it describes *what* and it goes. If the code below reads clearly, write nothing — a comment that adds nothing is deleted rather than shortened.
 
 ## OPERATIONAL WORKFLOW
 
@@ -77,11 +79,14 @@ Documentation is only necessary where the code is not self-explanatory, all file
 
 ## COMMAND LAWS
 
-- All Date/Time values in `.devdocs/` are reverse-chronological (newest entry at the top of the file) and must be sourced from system execution — never constructed manually:
+- All Date/Time values in `.devdocs/` are **UTC, carrying an explicit `Z`**, and must be sourced from the active harness's own tooling — never constructed manually, and never local time. A bare local stamp is ambiguous the moment a second machine, a second contributor or a second timezone touches the file, and the ledgers are ordered by it:
 
   ```sh
-  date '+%Y-%m-%d %H:%M'
+  date -u '+%Y-%m-%dT%H:%MZ'
   ```
+
+  An offset (`+10:00`) is acceptable where a local reading genuinely matters; a stamp with neither `Z` nor an offset is not.
+- Entries stay **reverse-chronological** — newest at the top of the file.
 - ALWAYS USE THE NATIVE TOOLING OF THE ACTIVE HARNESS - IF YOU ARE IN AN IDE ALWAYS USE THE NATIVE IDE TOOLING 
 
 - DO NOT - create python scripts or run bash scripts to speed up behaviours or hasten the workload completion - DO NOT - use terminal or bash commands or scripts where there is available tooling or a practical ordefined method to behave from within the harness.

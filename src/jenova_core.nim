@@ -5294,6 +5294,27 @@ proc main() =
         check("and the image part survives the strip",
               parts.len == 2 and parts[1]{"type"}.getStr == "image_url", $parts)
 
+      # Action purpose: `userText` joins every text part and `detectIntent`
+      # strips leading whitespace off that join, so an empty leading part leaves
+      # the prefix in the second one. Editing the first text part unconditionally
+      # stripped nothing and sent the marker on to the model — detected here and
+      # answered there, which is the outcome the strip exists to prevent.
+      block thePrefixIsStrippedFromThePartCarryingIt:
+        let body = """{"messages":[{"role":"user","content":[""" &
+          """{"type":"text","text":""},""" &
+          """{"type":"text","text":"Web Search: what is FreeBSD"}""" &
+          """]}]}"""
+        let r = pipeline.prepare(body)
+        check("the intent is detected out of a later text part",
+              r.intent == inWebSearch)
+        let parts = parseJson(r.body)["messages"][^1]["content"]
+        check("both text parts survive", parts.len == 2, $parts.len)
+        check("the empty leading part is left alone",
+              parts[0]["text"].getStr.len == 0, parts[0]["text"].getStr)
+        check("and the prefix is gone from the part that carried it",
+              not parts[1]["text"].getStr.contains("Web Search:"),
+              parts[1]["text"].getStr)
+
       # Action purpose: the chain the inspector reads, with the sockets taken
       # out — the pipeline's own measurements, through the header builder
       # `server.handle` actually calls, and back out of the parser the window

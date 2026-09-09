@@ -120,15 +120,6 @@ proc userText*(content: JsonNode): string =
   else:
     ""
 
-## Function purpose: where a prefix strip has to be written back on an array
-## turn. Assigning a string over the array would drop every attachment with it,
-## and the prefix only ever sits at the head of the first text part.
-proc firstTextPart(content: JsonNode): JsonNode =
-  if content.isNil or content.kind != JArray: return nil
-  for p in content:
-    if p.kind == JObject and p{"type"}.getStr("") == "text": return p
-  nil
-
 ## Function purpose: the prefix is stripped because it is addressed to this
 ## program and not to the model, which would otherwise answer about the marker.
 proc detectIntent*(text: string): tuple[intent: Intent, stripped: string] =
@@ -137,6 +128,22 @@ proc detectIntent*(text: string): tuple[intent: Intent, stripped: string] =
     if trimmed.startsWith(prefix):
       return (intent, trimmed[prefix.len .. ^1].strip(trailing = false))
   (inNone, text)
+
+## Function purpose: where a prefix strip has to be written back on an array
+## turn. Assigning a string over the array would drop every attachment with it.
+##
+## Action purpose: **the part that carries the prefix, not the first text part.**
+## `userText` joins every text part and `detectIntent` strips leading whitespace
+## off that join, so an empty or blank leading part leaves the prefix sitting in
+## the *second* one. Editing the first then strips nothing and the marker travels
+## to the model in the outbound body — detected by this program and answered by
+## the model, which is the one outcome the strip exists to prevent.
+proc prefixedTextPart(content: JsonNode): JsonNode =
+  if content.isNil or content.kind != JArray: return nil
+  for p in content:
+    if p.kind != JObject or p{"type"}.getStr("") != "text": continue
+    if detectIntent(p{"text"}.getStr("")).intent != inNone: return p
+  nil
 
 ## Function purpose: a visual rewrite needs almost no context, a web search
 ## needs none because its context comes from the web, and a large file-chat
@@ -377,12 +384,12 @@ proc prepare*(rawBody: string, projectRoot = ""): Prepared =
   let (intent, stripped) = detectIntent(lastUser)
   result.intent = intent
   if stripped != lastUser:
-    # Action purpose: the array form is edited in place, one part deep. The
-    # prefix is at the head of the turn and `userText` joins the text parts in
-    # order, so it is at the head of the first of them; replacing the whole
-    # content with a string would send the attachments nowhere.
+    # Action purpose: the array form is edited in place, one part deep —
+    # replacing the whole content with a string would send the attachments
+    # nowhere. The part edited is the one that actually carries the prefix,
+    # which is not always the first text part.
     if content.kind == JArray:
-      let part = firstTextPart(content)
+      let part = prefixedTextPart(content)
       if part != nil:
         part["text"] = %detectIntent(part{"text"}.getStr("")).stripped
     else:

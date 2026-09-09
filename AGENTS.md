@@ -55,7 +55,7 @@ The "Dependency added/removed/changed" row governs a dependency shift discovered
 * `Function purpose:` [why it exists and how it is used] — **required above every new public/exported function**, and above a private one whose purpose the body does not make obvious. An FFI declaration gets none; its enclosing `{.push .}` block gets one `Action purpose:` naming the library. **Budget: 1 line; 2 only where one genuinely cannot carry it.**
 * `Action purpose:` [why this logic, and how it is meant to work] — above a block that is genuinely not self-explanatory: a workaround for external behaviour, an ordering constraint, a non-obvious invariant, a deliberate omission. **Budget: 1–3 lines.**
 
-**The budgets are the half that gets skipped.** Adding coverage where it is missing while leaving volume where it is excessive moves the total the wrong way, and has.
+**The budgets are a ceiling to cut to, not a target to fill.** They bind in both directions: when you touch a comment that runs over its budget, cut it back in the same edit. Coverage and volume are one rule, not two — adding a missing comment while leaving an over-long one beside it untouched raises the total, which is the opposite of what this standard exists to do.
 
 **Comment only what the code cannot say for itself.** Do not restate a name, a signature, or the statement below it. The test: if the sentence stays true when the function is renamed to `doThing`, it describes *what* and it goes. If the code below reads clearly, write nothing — a comment that adds nothing is deleted rather than shortened.
 

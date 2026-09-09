@@ -3,6 +3,9 @@
 Milestone ledger. One line per completed, superseded or removed feature or bug.
 Newest first.
 
+- 2026-09-09T05:43Z — `AGENTS.md`'s budget rule states what it requires. The sentence ended
+  in an elliptical "and has", which pointed at a measurement recorded elsewhere and named no
+  rule; the budgets are now stated as a ceiling to cut to, binding in both directions.
 - 2026-09-09T05:31Z — `.devdocs/BLUEPRINT.md`, `ARCHITECTURE_MAPPING.md` and `TESTS.md`
   created, completing the eleven trackers the Workspace Architecture mandates. Written from
   the source traced this session, and deliberately carrying no line numbers or counts.

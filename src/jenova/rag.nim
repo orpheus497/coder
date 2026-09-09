@@ -555,6 +555,55 @@ proc ftsQueryString(query: string): string =
       terms.add "\"" & t & "\""
   terms.join(" OR ")
 
+## Function purpose: whether the row a chunk was filed from is still live.
+##
+## Action purpose: **defence in depth, not a replacement for unfiling.** Every
+## delete path calls `forgetMessage`, `forgetNote`, `forgetFileAsset` or
+## `forgetConversation`, and those stay. But each of them runs inside the
+## caller's `indexing` guard, which swallows a failure on purpose — retrieval
+## degrading is not worth a user's note — so a skipped unfile leaves deleted
+## content answering queries with nothing anywhere to show it. That is the one
+## failure the user cannot see: the deletion is honoured everywhere except in
+## what the model recalls.
+##
+## The path shapes are this module's own (`chatPath`, `notePath`,
+## `fileAssetPath`), so nothing outside it has to agree about the format. An
+## unrecognised root answers live rather than dead: dropping what cannot be
+## classified would silently empty retrieval for any writer added later.
+##
+## Action purpose: **only an explicit `is_deleted` flag drops a hit; an absent
+## row does not.** The two are different claims and conflating them is a
+## behaviour change rather than a guard. Deletion here is soft throughout — rows
+## are flagged and never removed — so a missing row means something other than
+## deletion: an index entry filed under a synthetic path, or one whose row a
+## migration or a test hard-removed. Treating absence as death would empty
+## retrieval for all of them, which is the failure this proc exists to avoid
+## pointed the other way.
+proc pathIsLive(path: string): bool =
+  let parts = path.split('/')
+  if parts.len == 0: return true
+
+  proc flaggedDeleted(table, id: string): bool =
+    if id.len == 0: return false
+    db.query("SELECT 1 FROM " & table & " WHERE id=? AND is_deleted<>0",
+             id).len > 0
+
+  case parts[0]
+  of ChatRoot:
+    # chat/<convId>/<role>/<msgId> — the message, not the conversation, because
+    # a single turn can be deleted out of a live chat, and a conversation delete
+    # flags every message it holds.
+    if parts.len < 4: return true
+    not flaggedDeleted("messages", parts[3])
+  of NoteRoot:
+    if parts.len < 2: return true
+    not flaggedDeleted("notes", parts[1])
+  of FileRoot:
+    if parts.len < 2: return true
+    not flaggedDeleted("fileAssets", parts[1])
+  else:
+    true
+
 ## Function purpose: read from the stored chunk text rather than from the
 ## original file, which may have changed or gone since it was indexed.
 proc snippetFor(path: string, startLine: int): string =
@@ -675,7 +724,18 @@ proc query*(queryStr: string, topK = 5, withSnippets = true,
       else: nb
 
   merged.sort(proc (a, b: Hit): int = cmp(b.score, a.score))
-  if merged.len > topK: merged.setLen topK
+
+  # Action purpose: the liveness check runs after the sort and before the
+  # ceiling, so a deleted row costs its own slot rather than the whole answer.
+  # Filtering after `setLen` would return four hits where five were asked for
+  # and five live ones existed; walking the sorted list until `topK` are found
+  # keeps the result full. The lookup is one indexed read per hit examined, and
+  # on the ordinary path — nothing deleted — that is exactly `topK` of them.
+  var live: seq[Hit]
+  for h in merged:
+    if live.len >= topK: break
+    if pathIsLive(h.path): live.add h
+  merged = live
 
   if withSnippets:
     for i in 0 ..< merged.len:

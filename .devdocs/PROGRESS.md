@@ -3,6 +3,17 @@
 Milestone ledger. One line per completed, superseded or removed feature or bug.
 Newest first.
 
+- 2026-09-09T05:31Z — `.devdocs/BLUEPRINT.md`, `ARCHITECTURE_MAPPING.md` and `TESTS.md`
+  created, completing the eleven trackers the Workspace Architecture mandates. Written from
+  the source traced this session, and deliberately carrying no line numbers or counts.
+- 2026-09-09T05:31Z — Phase 0.2 closed: the comment standard's budgets — 1–4 lines for a file
+  header, 1 for a function, 1–3 for a block — plus the no-labels and no-history prohibitions
+  are recorded in `AGENTS.md`, where a future session reads them.
+- 2026-09-09T05:31Z — `rag.query` filters hits whose source row is flagged deleted. Every
+  `forget*` call runs inside a guard that swallows failures by design, so a skipped unfile
+  left deleted content answering queries with nothing anywhere to show it. Only an explicit
+  `is_deleted` flag drops a hit; an absent row stays live, which is what keeps a synthetic or
+  hard-removed path retrievable. Three assertions, one proven to fail with the filter disabled.
 - 2026-09-09T05:14Z — `pipeline.prefixedTextPart` replaces `firstTextPart`: the strip edits the
   text part that actually carries the intent prefix, not the first one. `userText` joins every
   text part and `detectIntent` strips leading whitespace off the join, so an empty leading part

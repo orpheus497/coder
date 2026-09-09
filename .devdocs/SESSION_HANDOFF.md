@@ -102,6 +102,36 @@ cannot drift.
 `nimble core` and `nimble gui` build. **Twenty of the twenty-two self-tests pass**;
 `serve` and `relay` were not run. `routes-selftest` is listed by `--help`.
 
+### Continued — retrieval liveness, the three missing trackers, Phase 0.2
+
+**`rag.query` now filters deleted rows.** Report 03 named this as the shared root of two
+of its deferred findings. Unfiling on delete stays and is still the primary mechanism;
+this is the backstop under it, and it is needed because every `forget*` call runs inside
+`api.indexing`, which swallows failures on purpose — so a skipped unfile left deleted
+content answering queries, with the deletion honoured everywhere except in what the model
+recalls.
+
+**The first attempt at it was wrong and the existing suite caught it.** Testing
+`is_deleted=0` treats an absent row and a deleted row as the same claim, and two of
+R-15's assertions — which index a note by title with no matching row — went red. An
+absent row is not a deletion: this codebase soft-deletes throughout, so a missing row
+means something else entirely. Only an explicit flag drops a hit now.
+
+**The three trackers the Workspace Architecture mandates and nobody had written** —
+`BLUEPRINT.md`, `ARCHITECTURE_MAPPING.md`, `TESTS.md` — are in, built from the source
+traced this session rather than from the reports, and carrying no line numbers or counts
+by design.
+
+**Phase 0.2 is closed.** `AGENTS.md` now carries report 04 §3's budgets and the two
+prohibitions that produced the original pollution — no cross-reference labels, no history.
+The budgets are the half that keeps getting skipped, and the census shows it: coverage was
+added while volume was not cut, and the total moved the wrong way.
+
+### Verification, third part
+
+`nimble core` and `nimble gui` build. **Twenty of the twenty-two self-tests pass.** The
+retrieval gate was proven to fail with the filter disabled.
+
 ### Next steps
 
 Rule on D5, D6 and V-17. Run the listener suites when permitted. Take the FreeBSD work now

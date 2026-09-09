@@ -51,11 +51,18 @@ The "Dependency added/removed/changed" row governs a dependency shift discovered
 
 **Format — the prefixes are required**, written in the language's native comment syntax (`//`, `#`, `##`). For shell scripts, place the file-level comment directly beneath the shebang.
 
-* `Script function and purpose:` [what this file is for, and its place in the system] — at the top of a source file **you create**.
-* `Function purpose:` [why it exists and how it is used] — **required above every new public/exported function**, and above a private one whose purpose the body does not make obvious. An FFI declaration gets none; its enclosing `{.push .}` block gets one `Action purpose:` naming the library.
-* `Action purpose:` [why this logic, and how it is meant to work] — above a block that is genuinely not self-explanatory: a workaround for external behaviour, an ordering constraint, a non-obvious invariant, a deliberate omission.
+* `Script function and purpose:` [what this file is for, and its place in the system] — at the top of a source file **you create**. **Budget: 1–4 lines, hard ceiling 6.**
+* `Function purpose:` [why it exists and how it is used] — **required above every new public/exported function**, and above a private one whose purpose the body does not make obvious. An FFI declaration gets none; its enclosing `{.push .}` block gets one `Action purpose:` naming the library. **Budget: 1 line; 2 only where one genuinely cannot carry it.**
+* `Action purpose:` [why this logic, and how it is meant to work] — above a block that is genuinely not self-explanatory: a workaround for external behaviour, an ordering constraint, a non-obvious invariant, a deliberate omission. **Budget: 1–3 lines.**
+
+**The budgets are the half that gets skipped.** Adding coverage where it is missing while leaving volume where it is excessive moves the total the wrong way, and has.
 
 **Comment only what the code cannot say for itself.** Do not restate a name, a signature, or the statement below it. The test: if the sentence stays true when the function is renamed to `doThing`, it describes *what* and it goes. If the code below reads clearly, write nothing — a comment that adds nothing is deleted rather than shortened.
+
+**Two prohibitions, both from defects this repository has already had:**
+
+* **No cross-reference labels.** No `G-30`, `D-BQ`, `W-01`, `P-A5`. Where a label carried real information, state the information in words. These once reached 689 references across `src/`, pointing at documents that had been deleted. (`SHA-256`, `UTF-8`, `PDF-1` are not labels.)
+* **No history.** No "used to", "was missing", "shipped", "the old", no dates, no session numbers. Present tense, describing the code as it stands. A comment that recounts what a past change fixed is a commit message in the wrong file, and it goes stale the moment anything moves.
 
 ## OPERATIONAL WORKFLOW
 

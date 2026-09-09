@@ -19,9 +19,16 @@
 
 ### Defects
 
-- **D9 — no chunked request bodies.** `http.parseRequest` reads `Content-Length` only.
-- **`rag.query` does not filter deleted rows.** Root of two of report 03's three
-  deferred findings.
+- **D9 — no chunked request bodies.** `http.parseRequest` reads `Content-Length` only, and
+  `upstream.buildRequest` strips `transfer-encoding` from what it forwards, so a chunked
+  POST is read as an empty body rather than refused. Low reach — the frozen client sends
+  `Content-Length` — but the failure is silent, which is the part worth closing. The
+  dechunker should be factored pure so it is assertable without a socket.
+- **The two races report 03 deferred remain open.** `rag.query` now filters deleted rows,
+  which was named as their shared root, so a stale hit is no longer *returned*. The races
+  themselves — `forgetMessage` against restore-and-update indexing, and descendant discovery
+  against fork creation — still need the per-message lock or deletion generation that report
+  03 describes, and that is a concurrency design for the retrieval layer rather than a patch.
 - **`serve-selftest`, `relay-selftest` and the six shell suites have not been run** since the
   changes of 2026-09-09. They bind listeners and the session was instructed not to run the
   server. Nothing depends on them for the fixes made — `routes-selftest` covers the routing
@@ -38,7 +45,6 @@
 
 ### Carried from the audit reports
 
-- Phase 0.2 — record the comment standard where a future session reads it.
 - Phase 2.2 — reduce the three render memos to viewport scale.
 - Phase 4.3 — the command palette.
 - Phase 5.4 — attachment "view all", favourite models, selective export; plus the model

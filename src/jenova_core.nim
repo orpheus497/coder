@@ -7249,6 +7249,48 @@ proc main() =
           echo "  FAIL the vector-scan ceiling is too low: ", rag.MaxVectorScan
           inc failures
 
+      # Action purpose: unfiling on delete is the primary mechanism and it stays.
+      # This asserts the backstop underneath it. Every `forget*` call runs inside
+      # `api.indexing`, which swallows a failure on purpose — retrieval degrading
+      # is not worth a user's note — so a skipped unfile leaves a deleted row
+      # answering queries, with the deletion honoured everywhere except in what
+      # the model recalls. The chunks are left filed here deliberately, because
+      # that is the state the swallowed failure produces.
+      block deletedRowsAreNotRecalled:
+        proc live(label: string, cond: bool, detail = "") =
+          if cond: echo "  ok   ", label
+          else:
+            echo "  FAIL ", label,
+                 (if detail.len > 0: "\n       " & detail else: "")
+            inc failures
+
+        const noteId = "ragtest-deleted-note"
+        const body = "gorgonzola stilton roquefort"
+        db.exec("DELETE FROM notes WHERE id=?", [noteId])
+        db.exec("INSERT INTO notes (id, folderId, projectId, workspaceId, " &
+                "title, content, updatedAt, isFocusNote, is_deleted) " &
+                "VALUES (?, '', '', '', 'Deletable', ?, 0, 0, 0)",
+                [noteId, body])
+        discard rag.indexContent(rag.notePath(noteId), body)
+
+        live("an indexed note is retrievable",
+             rag.query("gorgonzola", topK = 5, withSnippets = false).len > 0)
+
+        db.exec("UPDATE notes SET is_deleted=1 WHERE id=?", [noteId])
+        let after = rag.query("gorgonzola", topK = 5, withSnippets = false)
+        live("a deleted note is not recalled, even with its chunks still filed",
+             after.len == 0, $after.len)
+
+        # Restore is the other half: the filter must read the row rather than
+        # remember a verdict, or a restored note stays invisible to retrieval
+        # until something re-indexes it.
+        db.exec("UPDATE notes SET is_deleted=0 WHERE id=?", [noteId])
+        live("...and restoring the row makes it retrievable again",
+             rag.query("gorgonzola", topK = 5, withSnippets = false).len > 0)
+
+        rag.forgetFile(rag.notePath(noteId))
+        db.exec("DELETE FROM notes WHERE id=?", [noteId])
+
       if failures == 0:
         echo ""
         echo "rag-selftest: PASS"

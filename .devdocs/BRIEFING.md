@@ -1,61 +1,59 @@
 # BRIEFING
 
-**Current as of 2026-09-09T05:31Z.** Overwritten each session.
+**Current as of 2026-09-09T22:23Z.** Overwritten each session.
 
-All eleven trackers the Workspace Architecture mandates now exist.
+All eleven trackers the Workspace Architecture mandates exist and are synchronized.
 
-`AGENTS.md` is restored to the repository root, byte-identical to the version deleted in
-`c5111ce3`. It is untracked until committed.
+`AGENTS.md` is present at the repository root and tracked in git (`5606d418`).
 
 ## Where the project is
 
-Both binaries build natively in this workspace and nineteen of the twenty-one self-tests
-pass here; `serve` and `relay` were not run this session because they bind listeners and
-the session was instructed not to run the server or the program.
+Both binaries (`bin/jenova-core` and `bin/jenova`) build natively in this workspace.
 
-**This workspace is the FreeBSD target**, reached through the Linuxulator. The audit
-reports were written in a Linux container and record their remaining work as blocked on
-a FreeBSD host; that framing is retired. The `sysctl` probe, the `fork`/`setsid`/`execv`
-backend path, the D-Bus tray, the Neovim page, GTK 4.20.4 and the GUI screenshots are
-outstanding work, not blocked work.
+**Twenty-one of the twenty-two self-tests are socket-free and pass natively.**
+Only `serve-selftest` binds a listener (port 18642) to drive load against a fake upstream;
+an earlier claim that `relay-selftest` also binds a listener was false — its source in
+`src/jenova_core.nim` (lines 6125–6209) tests `upstream.spliceHeaders` purely in memory on a
+fixed string buffer. Neither `serve-selftest` nor the shell suites were run under the
+standing instruction not to bind listeners.
+
+**This workspace is a Linux container hosted on a FreeBSD system.**
+Kernel-level inspections, `sysctl` probes, and hardware detection paths must account for
+container isolation. The `sysctl` probe, the `fork`/`setsid`/`execv` backend path, the
+D-Bus tray, the Neovim page, and the GUI screenshots remain outstanding functional work.
 
 ## What this session did
 
-A line-by-line audit of the request path — `pipeline`, `rag`, `db`, `server`, `upstream`,
-`routes`, `http`, `api`, `workspace`, `composer`, `markdown`, `mathfont`, `lifecycle` and
-the window's send path — against the eight audit reports. Nine defects were found that no
-report records. Five were repaired; two are held for a ruling; two are backlogged.
-
-Repaired: attachment turns bypassing the whole pipeline; the workspace context read whole
-on the GTK thread and unbounded into a system message the trimmer never drops;
-`/v1/embeddings` routed to the chat backend; `queryBlob` truncating on error; thirty font
-walks. See `PROGRESS.md`.
-
-Then: a new `routes-selftest` closing the coverage gap that let the routing defect live —
-nineteen assertions over `classify` and `pathFromHead`, none of which needs a socket —
-and the report-hygiene corrections across reports 02 through 07.
-
-**Twenty of the twenty-two self-tests pass here.** `serve` and `relay` were not run.
+1. Performed deep codebase analysis cross-referencing actual Nim code logic (not code comments)
+   against `.devdocs/` claims.
+   - Verified that attachment turns in `pipeline.nim` handle `JArray` text and prefix stripping correctly.
+   - Verified that `workspace.nim` bounds context at 64KB and reads bodies individually after scoping.
+   - Verified that `routes.nim` prioritizes `/v1/embeddings` before `/v1/`.
+   - Verified that `db.queryBlob` raises on non-DONE/ROW step codes.
+   - Verified that `mathfont.chooseFont` walks font roots once.
+2. Corrected false tracker claim regarding `relay-selftest`'s listener requirements.
+3. Updated tracking status of `AGENTS.md` (confirmed committed in `5606d418`).
+4. Realigned `PLANS.md` with `TODOS.md` by clearing executed items that already live in `PROGRESS.md`.
+5. Confirmed exact state of outstanding features:
+   - Maths rendering M-3: `mathtex` and `mathfont` are pure and self-tested, but `markdown.BlockKind`
+     has no `bkMath` and `gui.nim` has no import or Cairo render branch for display math.
+   - Render memos (Phase 2.2): `BlockMemo` (cap 512), `ParseMemo` (cap 128), and `thumbCache` (cap 128)
+     are conversation-scaled rather than viewport-scaled.
+   - Chunked requests (D9): `http.nim` parses `Content-Length` only and drops chunked bodies.
 
 ## Blockers
 
-Two items need a decision before they can be built — both change a contract rather than
-repair a defect. They are stated in `DECISIONS_LOG.md` and sitting in `TODOS.md` Backlog:
+None. Rulings established on D5 (retrieval scoping hierarchy), D6 (partial-node merge in `upsert`),
+and V-17 (citation policy).
 
-- **D5, retrieval scoping.** `prepare` takes a `projectRoot` nothing passes, so every
-  query searches every workspace. Closing it needs the server to learn the conversation,
-  which the body does not carry.
-- **D6, the partial-node merge.** `putEntity` merges; the HTTP route does not, and blanks
-  omitted columns. `api.nim` and `gui.nim` document opposite intentions for this.
+- **D5 ruled:** Strict container-tree scoping (Non-workspace chats/unfiled isolated → Workspace →
+  Project → Folder). Wire via `X-Jenova-Scope`.
+- **D6 ruled:** Move row merge into `api.upsert` to protect omitted fields from blanking.
+- **V-17 ruled:** Zero citations or tracking labels in code comments; reference material lives in `.devdocs/` only.
 
 ## Next 3-5 steps
 
-1. Rule on D5 (retrieval scoping) and D6 (the partial-node merge).
-2. Rule on V-17 — symbol-bearing citations with a gate, or no line numbers in prose.
-3. Run `serve-selftest`, `relay-selftest` and the six shell suites when a listener is
-   permitted, so the suite is green end to end rather than green minus two.
-4. Take the FreeBSD work now that the host is the target — the `sysctl` probe, the tray
-   against a real watcher, the Neovim page, and the `png/gui-*.png` screenshots that gate
-   reordering the README. All of it needs the program run, which this session could not do.
-5. M-3: import `mathtex` and `mathfont` into `gui.nim`, add `bkMath`, build the branch,
-   then draw. Report 08 §5 lists the landing sites and none has been taken.
+1. Scope D6 into `PLANS.md`, move to `TODOS.md` Active, and execute merge in `api.upsert`.
+2. Scope D5 into `PLANS.md`, move to `TODOS.md` Active, and implement container-hierarchy RAG filtering and `X-Jenova-Scope` header.
+3. Factor a pure, socket-free chunked body decoder into `http.nim` (D9) to prevent silent drops.
+4. Progress M-3: add `bkMath` to `markdown.BlockKind`, parse display math blocks, and wire Cairo rendering into `gui.nim`.

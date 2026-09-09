@@ -6,16 +6,16 @@
 
 ## Backlog
 
-### Awaiting a ruling
+### Ruled and Ready for Implementation
 
-- **D5 — retrieval is never scoped.** `prepare` takes a `projectRoot` and the server
-  never passes one, so every query searches every workspace. Needs a wire decision:
-  how does the server learn the conversation?
-- **D6 — the partial-node merge protects the window only.** `putEntity` merges onto the
-  stored row; the `POST /api/db/*` route calls `upsert` directly and blanks omitted
-  columns. Conflicts with `api.nim`'s stated intent.
-- **V-17 — report citations drift.** Symbol-bearing citations with a gate, or drop line
-  numbers from prose.
+- **D6 — partial-node merge in `upsert`.** Ruled: move row merge into `api.upsert` so partial
+  JSON updates preserve stored columns across both HTTP and in-process writes.
+- **D5 — retrieval scoping hierarchy.** Ruled: RAG strictly scopes down the container tree:
+  Non-workspace (only non-workspace chats & unfiled artifacts) → Workspace (workspace & subfolders) →
+  Workspace Project (project & subfolders) → Project Sub-folder (only folder contents). Wire via
+  `X-Jenova-Scope` header carrying container hierarchy.
+- **V-17 — documentation citation policy.** Ruled: zero citations, labels, or document cross-references
+  in code comments. Citations live strictly in `.devdocs/` as reference material.
 
 ### Defects
 
@@ -29,10 +29,12 @@
   themselves — `forgetMessage` against restore-and-update indexing, and descendant discovery
   against fork creation — still need the per-message lock or deletion generation that report
   03 describes, and that is a concurrency design for the retrieval layer rather than a patch.
-- **`serve-selftest`, `relay-selftest` and the six shell suites have not been run** since the
+- **`serve-selftest` and the six shell suites have not been run** since the
   changes of 2026-09-09. They bind listeners and the session was instructed not to run the
-  server. Nothing depends on them for the fixes made — `routes-selftest` covers the routing
-  change without a socket — but the suite is not fully green until they are run.
+  server. `relay-selftest` does not bind a socket (it tests pure string header splicing in memory)
+  and can run socket-free. Nothing depends on the listener suites for the fixes made —
+  `routes-selftest` covers the routing change without a socket — but the suite is not fully
+  green until they are run.
 
 ### Reachable now that the target host is the working host
 

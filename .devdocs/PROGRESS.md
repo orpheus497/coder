@@ -3,6 +3,8 @@
 Milestone ledger. One line per completed, superseded or removed feature or bug.
 Newest first.
 
+- 2026-09-09T22:35Z — Architectural rulings established: D5 retrieval scoping hierarchy (non-workspace isolation down to folder scope), D6 partial-node merge in `upsert`, and V-17 strict ban on citations in code comments.
+- 2026-09-09T22:23Z — `.devdocs/` audit and hygiene: corrected false claim that `relay-selftest` binds a listener (it asserts `spliceHeaders` on pure strings in memory), clarified Linux-container-on-FreeBSD environment context, confirmed `AGENTS.md` tracked and committed in `5606d418`, and cleared executed items from `PLANS.md`.
 - 2026-09-09T05:43Z — `AGENTS.md`'s budget rule states what it requires. The sentence ended
   in an elliptical "and has", which pointed at a measurement recorded elsewhere and named no
   rule; the budgets are now stated as a ceiling to cut to, binding in both directions.

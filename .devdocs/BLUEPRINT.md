@@ -91,11 +91,14 @@ is what makes "the daemon is up" and "the client port answers" incapable of disa
 
 ## Known architectural debts
 
-- **Retrieval is not scoped.** `prepare` accepts a project root and no caller passes one.
-  Closing it needs the server to learn which conversation a completion belongs to, and the
-  body does not carry that. Awaiting a ruling — see `DECISIONS_LOG.md`.
-- **Partial writes differ by surface.** The in-process entry point merges a partial node
-  onto the stored row; the HTTP route does not. Awaiting a ruling.
+- **Retrieval scoping contract (ruled):** RAG search follows a strict container tree:
+  No workspace (only non-workspace chats and unfiled artifacts, completely isolated from workspaces) →
+  Workspace (workspace and all descendant projects/folders) →
+  Project (project and its child folders) →
+  Folder (only that folder).
+  Wired via `X-Jenova-Scope` header carrying container hierarchy to `pipeline.prepare`.
+- **Partial writes differ by surface (ruled):** Merge logic moves into `upsert`, so omitted
+  columns preserve existing stored values across both in-process and HTTP `/api/db/*` writes.
 - **The maths engine is not linked into the window.** The parser, layout and font probe
   are written and asserted, and nothing in `gui.nim` can reach them.
 - **The render memos are conversation-scaled, not viewport-scaled**, now that the

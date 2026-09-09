@@ -40,8 +40,9 @@ not the other is undiscoverable from the binary, which has happened.
 
 ### Which of them bind a listener
 
-`serve` and `relay` stand up sockets. Everything else is socket-free and can run under a
-constraint that forbids running a server. `routes` exists precisely because the routing
+`serve` stands up a socket (port 18642). `relay` does not stand up a socket — its assertions
+test `upstream.spliceHeaders` purely on in-memory string buffers. All other 21 self-tests are socket-free
+and can run under a constraint that forbids running a server. `routes` exists precisely because the routing
 table was previously assertable only through `serve` — a property decidable with no socket
 had no socket-free test, and a routing defect lived in the gap.
 
@@ -74,9 +75,9 @@ passes is the defect it was written to catch, in a new place.
 
 ## Current state
 
-Twenty of the twenty-two self-tests pass in this workspace. `serve` and `relay` have not
-been run under the standing instruction not to run the server; nothing currently in the
-tree depends on them for its own coverage, but the suite is not green end to end until
-they are run.
+Twenty-one of the twenty-two self-tests are socket-free and pass in this workspace.
+`serve-selftest` binds a listener and has not been run under the standing instruction
+not to run the server; nothing currently in the tree depends on it for its own coverage,
+but the suite is not green end to end until it is run.
 
 The shell suites and `gui_build.sh` have likewise not been run here.

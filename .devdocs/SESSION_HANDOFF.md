@@ -4,6 +4,109 @@ Newest entry at the top.
 
 ---
 
+## 2026-09-09T22:35Z — architectural rulings confirmed: D5 retrieval scoping hierarchy, D6 partial-node merge, V-17 citation policy
+
+### What happened
+
+Received user rulings on the three primary architectural ambiguities: D5, D6, and V-17.
+Documented the exact specifications across `.devdocs/` trackers without making source code changes.
+
+### Rulings & Design Specifications
+
+1. **D5 — Retrieval Scoping Hierarchy:**
+   The user specified the authoritative hierarchy for RAG retrieval down the container tree:
+   - **No workspace (root/global chat):** RAG searches only non-workspace chats and saved files/notes
+     outside of any workspace. It does not retrieve anything from any workspace folder.
+   - **Workspace Folder:** RAG scopes to this workspace and all its subfolders and projects.
+   - **Workspace Project Folder:** RAG scopes to only this project and its subfolders.
+   - **Project Sub-folder:** RAG scopes to only this folder and its contents.
+   The client will pass the container context via the `X-Jenova-Scope` HTTP header, and
+   `pipeline.prepare` will enforce this scoping ladder over the FTS/vector index.
+2. **D6 — Partial-node merge in `upsert`:**
+   Ruled as recommended: Merge incoming partial JSON fields onto existing stored database rows
+   inside `api.upsert`. Updates via `POST /api/db/*` will preserve existing values for omitted
+   columns, eliminating the risk of accidental content blanking.
+3. **V-17 — Documentation citation policy:**
+   Ruled as recommended: Zero citations, tracking labels, or document cross-references in code
+   comments. Reference material and citations live strictly in `.devdocs/`.
+
+### Files touched
+
+`.devdocs/DECISIONS_LOG.md`, `.devdocs/BLUEPRINT.md`, `.devdocs/TODOS.md`,
+`.devdocs/BRIEFING.md`, `.devdocs/PROGRESS.md`, `.devdocs/SESSION_HANDOFF.md`,
+`.devdocs/SUMMARIES.md`.
+
+### Decisions
+
+Recorded in `DECISIONS_LOG.md`: D5 retrieval scoping hierarchy, D6 `upsert` merge, and V-17 code comment standards.
+
+### Next steps
+
+Await user instruction to begin implementation of D6 (partial-node merge in `api.upsert`),
+followed by D5 (container scoping in `pipeline.prepare` and `server.nim`), and D9 (pure dechunker).
+
+## 2026-09-09T22:23Z — devdocs audit against active code and correction of false claims
+
+### What happened
+
+Conducted a deep codebase analysis cross-referencing actual Nim code logic (not code comments)
+against `.devdocs/` trackers and audit reports. Discovered and corrected several tracker
+discrepancies, stale claims, and inaccurate assumptions about test execution and environment.
+No source code outside `.devdocs/` was modified.
+
+### Discrepancies and false claims resolved
+
+1. **`relay-selftest` does NOT bind a listener.** `src/jenova_core.nim` (lines 6125–6209)
+   demonstrates that `relay-selftest` tests `upstream.spliceHeaders` on fixed string literals in memory.
+   It opens no sockets, binds no ports, and requires no server. Trackers claiming `serve` and `relay`
+   both bind listeners were inaccurate; only `serve-selftest` binds a listener (port 18642).
+   Twenty-one of the twenty-two self-tests are completely socket-free.
+2. **`AGENTS.md` tracking status.** `BRIEFING.md` claimed `AGENTS.md` was untracked until committed.
+   Git log verifies it was committed in `5606d418` on branch `nimby`, and the working tree is clean.
+3. **Environment context.** Clarified that this workspace is a Linux container hosted on a FreeBSD
+   system. Kernel-level inspections, `sysctl` probes, and hardware detection paths reflect this
+   containerized layering.
+4. **Tracker synchronization (`PLANS.md`).** `PLANS.md` previously retained full implementation
+   plans for D1, D2/D3, D4, D7, and D8 after their completion. Because their completion records
+   live in `PROGRESS.md`, `PLANS.md` was cleared to align with `TODOS.md` Active.
+
+### Code verification highlights (logic verified, comments ignored)
+
+- **Attachment turns in `pipeline.nim`:** `userText` inspects `JString` or `JArray` content,
+  and `prefixedTextPart` isolates the specific text part carrying intent prefixes.
+- **Workspace context in `workspace.nim`:** Reads metadata columns first, scopes them, and then
+  reads individual row bodies capped at `MaxContextBytes = 64KB`.
+- **Route classification in `routes.nim`:** Embed endpoints (`/embed`, `/v1/embeddings`) are tested
+  prior to `/v1/` completion routes.
+- **Database query handling in `db.nim`:** `queryBlob` raises `DbError` on non-DONE/ROW step codes.
+- **Math font discovery in `mathfont.nim`:** `chooseFont` traverses font roots once.
+- **Display math M-3 in `markdown.nim` and `gui.nim`:** Confirmed that `BlockKind` lacks `bkMath`
+  and `gui.nim` does not import `mathtex` or `mathfont`, nor draw math blocks.
+- **Chunked request parsing in `http.nim`:** Confirmed `http.parseRequest` reads `Content-Length`
+  only, dropping chunked request bodies (D9).
+
+### Files touched
+
+`.devdocs/BRIEFING.md`, `.devdocs/TESTS.md`, `.devdocs/TODOS.md`, `.devdocs/PLANS.md`,
+`.devdocs/DECISIONS_LOG.md`, `.devdocs/PROGRESS.md`, `.devdocs/SESSION_HANDOFF.md`,
+`.devdocs/SUMMARIES.md`.
+
+### Decisions
+
+Recorded in `DECISIONS_LOG.md`: `relay-selftest` socket independence recognized; Linux container
+on FreeBSD environment clarified; `AGENTS.md` tracking verified; `PLANS.md` cleaned of executed items.
+
+### Verification
+
+All devdocs edits cross-referenced directly with Nim AST and logic in `src/jenova_core.nim`,
+`src/jenova/routes.nim`, `src/jenova/upstream.nim`, `src/jenova/pipeline.nim`,
+`src/jenova/workspace.nim`, `src/jenova/db.nim`, and `src/jenova/markdown.nim`.
+
+### Next steps
+
+Awaiting user rulings on D5 (retrieval scoping), D6 (partial-node merge in `upsert`), and
+V-17 (documentation citations). Upon approval: execute D6/D5/D9 and progress M-3 display math.
+
 ## 2026-09-09 — source audit against the eight reports, and five repairs
 
 ### What happened

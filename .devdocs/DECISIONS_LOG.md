@@ -4,6 +4,40 @@ Architectural and structural decisions, and ambiguities resolved. Newest first.
 
 ---
 
+## 2026-09-09T22:35Z — rulings on D5 (retrieval scoping hierarchy), D6 (partial-node merge), and V-17 (citation policy)
+
+Three open design decisions resolved by USER ruling:
+
+1. **D5, retrieval scoping hierarchy:**
+   Retrieval-Augmented Generation (RAG) scoping is strictly hierarchical down the container tree:
+   - **No workspace (root/global chat):** RAG searches only non-workspace chats and saved files/notes outside of any workspace. It does not retrieve anything from any workspace.
+   - **Workspace Folder:** RAG scopes to this workspace and all its subfolders and projects.
+   - **Workspace Project Folder:** RAG scopes to only this project and its subfolders.
+   - **Project Sub-folder:** RAG scopes to only this folder and its contents.
+   The wire contract uses `X-Jenova-Scope` carrying the container context (folderId, projectId, workspaceId) matching `workspace.contextFor` scoping.
+
+2. **D6, partial-node merge in `upsert`:**
+   Ruled as recommended: Move the merge-with-existing-row logic directly into `api.upsert`. When any caller (in-process GUI or `POST /api/db/*`) updates a row by `id`, omitted fields are merged from the stored row rather than overwritten with blank strings (`""`), protecting existing note contents and metadata from silent data loss.
+
+3. **V-17, documentation citation policy:**
+   Ruled as recommended: Absolute prohibition on citation labels, document references, line numbers, or cross-references inside source code comments. Code comments strictly adhere to AGENTS.md standards (`Script function and purpose:`, `Function purpose:`, `Action purpose:`). Reference citations and tracking belong exclusively in `.devdocs/` as reference material and nowhere else.
+
+## 2026-09-09T22:23Z — devdocs audit corrections: relay socket independence, container context, and tracker sync
+
+Three tracker ambiguities and inaccuracies resolved:
+
+1. **`relay-selftest` socket requirements corrected:** `src/jenova_core.nim` (lines 6125–6209)
+   demonstrates that `relay-selftest` tests `upstream.spliceHeaders` on fixed string literals in memory
+   without opening network sockets. Previous tracker statements claiming both `serve` and `relay`
+   bind listeners were inaccurate. Only `serve-selftest` binds a listener (port 18642). 21 of 22
+   self-tests are socket-free.
+2. **Execution environment clarified:** The workspace is a Linux container environment hosted on
+   a FreeBSD machine. Operating system assertions, `sysctl` probes, and hardware detection must
+   account for Linux container semantics and isolated `/proc` / kernel visibility.
+3. **Repository and tracker synchronization:** `AGENTS.md` is confirmed tracked and committed in
+   git commit `5606d418`. Executed plans D1, D2/D3, D4, D7, and D8 are cleared from `PLANS.md`
+   per the workspace architecture rule that `PLANS.md` carries only forward-looking implementation plans.
+
 ## 2026-09-09T04:24Z — the FreeBSD "blocked" framing is retired
 
 Report 05 Phase 1 and report 01 A-2 both record their remaining work as blocked on a

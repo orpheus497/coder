@@ -2,6 +2,136 @@
 
 Newest entry at the top.
 
+## 2026-09-09T23:22Z — chunk parser hardening: early size validation, overflow protection, and buffer pruning
+
+### What happened
+
+Addressed both review findings in `src/jenova/http.nim`:
+1. **Early chunk size validation & overflow protection:**
+   - In `feed`, checked `chunkSize > maxBytes - parser.body.len` immediately after hex decoding. If the declared chunk size exceeds allowable remaining body bytes, `parser.tooLarge = true` and `parser.error = true` are set immediately, rejecting oversized declarations before waiting for socket data or growing `raw`.
+   - Replaced `dataEnd + 2 > raw.len` with subtraction (`raw.len - dataEnd < 2`) to eliminate 64-bit integer overflow.
+   - Updated `parser.pos` on zero-chunk completion to advance past `\r\n` or trailer headers.
+2. **Consumed bytes pruning in socket read loop:**
+   - Restructured the chunked socket read loop in `parseRequest` to slice `raw` by removing consumed bytes (`raw = raw[parser.pos .. ^1]`) and resetting `parser.pos = 0` after each `feed` call. Preserves unconsumed framing bytes for subsequent reads without unbounded memory accumulation.
+3. **Unit test validation:**
+   - Added 4 unit assertions to `routes-selftest` in `src/jenova_core.nim` validating early rejection of oversized declared chunk sizes without body data, unconsumed framing preservation, and incremental decoding with buffer slicing.
+   - All 21 socket-free self-test suites pass cleanly (`routes-selftest` 36/36, `rag-selftest` 98/98, `workspace-selftest` 77/77, `pipeline-selftest` 134/134, `relay-selftest` 12/12, `inspect-selftest` 45/45).
+
+### Files touched
+
+- `src/jenova/http.nim`
+- `src/jenova_core.nim`
+- `.devdocs/PROGRESS.md`
+- `.devdocs/BRIEFING.md`
+- `.devdocs/SESSION_HANDOFF.md`
+- `.devdocs/SUMMARIES.md`
+
+### Decisions
+
+- Validated declared chunk size before evaluating buffer sufficiency so malicious or oversized chunk headers are rejected immediately at $O(1)$ cost.
+- Reset `parser.pos = 0` only after slicing `raw = raw[parser.pos .. ^1]`, keeping the parser state aligned with the active buffer slice.
+
+### Next steps
+
+1. Scope and implement M-3 maths rendering: introduce `bkMath` to `markdown.BlockKind`, parse display math fences (`$$...$$`), and connect `mathtex`/`mathfont` to the GTK/Cairo draw loop in `gui.nim`.
+2. Phase 2.2: reduce `BlockMemo`, `ParseMemo`, and `thumbCache` from full conversation scale to viewport scale.
+3. Design retrieval-layer concurrency locking or deletion generational counters to resolve the two deferred races from report 03.
+
+---
+
+## 2026-09-09T23:14Z — review findings resolved: AGENTS.md governance, RAG scope preloading & vector scan order, GUI header sanitization, and streaming ChunkParser
+
+### What happened
+
+Addressed and resolved all 7 review findings across the codebase and directives:
+1. **`AGENTS.md` canonical timestamps & direct approval:**
+   - Standardized `AGENTS.md` to canonical UTC ISO-8601 (`YYYY-MM-DDTHH:MMZ`) with explicit `Z` sourced from harness tooling/clock, eliminating local offset allowance (`+10:00`) and prescriptive shell commands.
+   - Replaced cross-reference label in line 73 with direct approval requirement.
+2. **`src/jenova/rag.nim` query performance & scan order:**
+   - Preloaded container scopes once per query (`noteContainers()`, `fileContainers()`, `conversationContainers()`), caching parent links alongside `folderParents()` and `projectParents()`. This eliminates per-candidate SQLite queries during vector and BM25 passes.
+   - Reordered the vector scan loop so `dotBlob(qv, blob)` cosine similarity and `s <= SemanticFloor` thresholding evaluate *before* `checkScope(cols[0])`, avoiding container resolution for low-similarity embeddings.
+   - Added CRLF sanitization to `formatScope` via `sanitizeScopePart`.
+3. **`src/jenova/gui.nim` header sanitization:**
+   - Sanitized `job.scopeHeader` at the send site by stripping `\r` and `\n` characters before appending `X-Jenova-Scope` into outbound request strings.
+4. **`src/jenova/http.nim` stateful chunk streaming & decoded byte limits:**
+   - Implemented stateful `ChunkParser` struct with incremental `feed` resuming from the previous read position without re-allocating or re-parsing earlier chunks.
+   - Bounded chunk header reads to `MaxHeadBytes` to protect against header floods.
+   - Measured `MaxBodyBytes` strictly against accumulated decoded payload bytes rather than transport framing delimiters, raising `BodyTooLargeError` if exceeded.
+5. **Validation & regression coverage:**
+   - Added 4 new assertions to `routes-selftest` in `src/jenova_core.nim` covering incremental chunk reading across multiple socket packets, payload vs transport limit verification, and CRLF scope stripping.
+   - Built `bin/jenova-core` natively with Nim compiler; executed all socket-free self-test suites (`routes-selftest` 32/32, `rag-selftest` 98/98, `workspace-selftest` 77/77, `pipeline-selftest` 134/134, `relay-selftest` 12/12, `inspect-selftest` 45/45, `db-selftest` 2000 ops) with 100% pass rate.
+
+### Files touched
+
+- `AGENTS.md`
+- `src/jenova/rag.nim`
+- `src/jenova/gui.nim`
+- `src/jenova/http.nim`
+- `src/jenova_core.nim`
+- `.devdocs/PROGRESS.md`
+- `.devdocs/BRIEFING.md`
+- `.devdocs/SESSION_HANDOFF.md`
+- `.devdocs/SUMMARIES.md`
+
+### Decisions
+
+- Preloaded entity container lookups in memory per RAG query, turning container hierarchy checks into $O(1)$ hash table operations while preserving isolation semantics.
+- Enforced `MaxBodyBytes` against cumulative decoded body bytes rather than raw chunk-encoded wire bytes to avoid rejecting valid payloads with heavy hex chunk framing.
+
+### Next steps
+
+1. Scope and implement M-3 maths rendering: introduce `bkMath` to `markdown.BlockKind`, parse display math fences (`$$...$$`), and connect `mathtex`/`mathfont` to the GTK/Cairo draw loop in `gui.nim`.
+2. Phase 2.2: reduce `BlockMemo`, `ParseMemo`, and `thumbCache` from full conversation scale to viewport scale.
+3. Design retrieval-layer concurrency locking or deletion generational counters to resolve the two deferred races from report 03.
+
+---
+
+## 2026-09-09T23:00Z — executed D6 partial-node merge, D5 retrieval scoping hierarchy, and D9 chunked request body parsing
+
+### What happened
+
+Implemented and verified the three approved tasks from the implementation plan:
+1. **D6 (Partial-node merge in `api.upsert`):** Moved the column merge logic from `putEntity` directly into `api.upsert`. HTTP `POST /api/db/*` callers omitting fields (such as note `content`) now preserve existing stored data, guaranteeing identical safe update semantics between in-process GUI writes and HTTP API clients. Verified with 2 new assertions in `workspace-selftest`.
+2. **D5 (Hierarchical retrieval scoping & `X-Jenova-Scope` wire contract):**
+   - Implemented `ScopeContext`, `parseScope`, `formatScope`, and `inScope` in `src/jenova/rag.nim`.
+   - Built down-tree container filtering matching the ruled ladder: non-workspace searches isolate completely from workspace folders; workspace searches cover workspace, project, and folder sub-trees; project searches cover project and child folders; folder searches isolate strictly to that folder.
+   - Wired `X-Jenova-Scope` header through `src/jenova/http.nim`, `src/jenova/server.nim`, `src/jenova/pipeline.nim`, and `src/jenova/gui.nim`.
+   - Added 16 assertions in `rag-selftest` in `src/jenova_core.nim`, testing every level of the ladder and isolating boundaries.
+3. **D9 (Pure HTTP chunked body parsing):**
+   - Implemented pure, socket-free `parseChunkedBody` in `src/jenova/http.nim`, handling chunk sizes, extensions, data delimiters, trailers, and `MaxBodyBytes` enforcement.
+   - Updated `parseRequest` to stream chunked bodies incrementally from the socket when `Transfer-Encoding: chunked` is present.
+   - Added 9 unit assertions in `routes-selftest` in `src/jenova_core.nim`.
+
+All 21 socket-free self-tests pass natively without listener binding.
+
+### Files touched
+
+- `src/jenova/api.nim`
+- `src/jenova/http.nim`
+- `src/jenova/rag.nim`
+- `src/jenova/pipeline.nim`
+- `src/jenova/server.nim`
+- `src/jenova/gui.nim`
+- `src/jenova_core.nim`
+- `.devdocs/PROGRESS.md`
+- `.devdocs/TODOS.md`
+- `.devdocs/PLANS.md`
+- `.devdocs/BLUEPRINT.md`
+- `.devdocs/BRIEFING.md`
+- `.devdocs/SESSION_HANDOFF.md`
+- `.devdocs/SUMMARIES.md`
+
+### Decisions
+
+- Evaluated container resolution in SQLite directly using `folderParents()` and `projectParents()`, caching lookup results during each RAG query to minimize database access.
+- Confirmed unfiled / non-workspace chats and notes are completely isolated from workspace folders during retrieval, while synthetic test paths without table rows are retrievable in global non-workspace mode.
+
+### Next steps
+
+1. Scope and implement M-3 maths rendering: introduce `bkMath` to `markdown.BlockKind`, parse display math fences (`$$...$$`), and connect `mathtex`/`mathfont` to the GTK/Cairo draw loop in `gui.nim`.
+2. Phase 2.2: reduce `BlockMemo`, `ParseMemo`, and `thumbCache` from full conversation scale to viewport scale.
+3. Design retrieval-layer concurrency locking or deletion generational counters to resolve the two deferred races from report 03.
+
 ---
 
 ## 2026-09-09T22:35Z — architectural rulings confirmed: D5 retrieval scoping hierarchy, D6 partial-node merge, V-17 citation policy

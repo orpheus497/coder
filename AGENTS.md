@@ -70,7 +70,7 @@ The "Dependency added/removed/changed" row governs a dependency shift discovered
 
 1. Read `.devdocs/BRIEFING.md` first, then `SESSION_HANDOFF.md`'s most recent entries, then any other `.devdocs/` file relevant to the task at hand. Full-file reads of every tracker on every session are not required once `BRIEFING.md` is current and accurate.
 2. Output a Session Briefing: current phase/status, previous session's accomplishments, current blockers, recent decisions, next 3-5 concrete steps.
-3. Clarify ambiguities and wait for approval before executing (per Directive 1).
+3. Clarify ambiguities and obtain approval before executing.
 
 ### Execution (per approved step)
 
@@ -86,13 +86,7 @@ The "Dependency added/removed/changed" row governs a dependency shift discovered
 
 ## COMMAND LAWS
 
-- All Date/Time values in `.devdocs/` are **UTC, carrying an explicit `Z`**, and must be sourced from the active harness's own tooling — never constructed manually, and never local time. A bare local stamp is ambiguous the moment a second machine, a second contributor or a second timezone touches the file, and the ledgers are ordered by it:
-
-  ```sh
-  date -u '+%Y-%m-%dT%H:%MZ'
-  ```
-
-  An offset (`+10:00`) is acceptable where a local reading genuinely matters; a stamp with neither `Z` nor an offset is not.
+- All Date/Time values in `.devdocs/` are **canonically UTC in ISO-8601 format carrying an explicit `Z`** (e.g. `YYYY-MM-DDTHH:MMZ`), and must be sourced from the active harness's own tooling or clock — never constructed manually, and never local time or offsets. A bare local stamp or arbitrary offset is ambiguous the moment a second machine, a second contributor or a second timezone touches the file, and the ledgers are ordered by it.
 - Entries stay **reverse-chronological** — newest at the top of the file.
 - ALWAYS USE THE NATIVE TOOLING OF THE ACTIVE HARNESS - IF YOU ARE IN AN IDE ALWAYS USE THE NATIVE IDE TOOLING 
 

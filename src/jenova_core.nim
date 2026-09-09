@@ -2783,6 +2783,14 @@ proc main() =
         check("...and the content it never mentioned survives",
               rule in workspace.contextFor("wst-fA1", "", ""))
 
+        let httpRes = api.handleDb(http.Request(
+          meth: "POST",
+          path: "/api/db/notes",
+          body: $(%*{"id": fixture, "title": "Rules III"})))
+        check("an HTTP partial update is accepted", httpRes.status == 200)
+        check("...and the HTTP partial update preserves omitted content",
+              rule in workspace.contextFor("wst-fA1", "", ""))
+
         # A transition, not a state: set → carried → cleared → set again.
         # Neither half passes alone — always-true would fail the clear, and
         # always-false would fail every line above.
@@ -5170,6 +5178,74 @@ proc main() =
         check("a complete one yields the target",
               routes.pathFromHead("GET /v1/chat HTTP/1.1\r\n") == "/v1/chat")
 
+      block chunkedTransferEncoding:
+        let (b1, ok1) = http.parseChunkedBody("5\r\nhello\r\n0\r\n\r\n")
+        check("single chunk decodes accurately", ok1 and b1 == "hello")
+
+        let (b2, ok2) = http.parseChunkedBody("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n")
+        check("multi-chunk stream decodes concatenated body", ok2 and b2 == "hello world")
+
+        let (b3, ok3) = http.parseChunkedBody("5;ext=val\r\nhello\r\n0\r\n\r\n")
+        check("chunk with extension is accepted", ok3 and b3 == "hello")
+
+        let (b4, ok4) = http.parseChunkedBody("5\r\nhello\r\n0\r\nExpires: never\r\n\r\n")
+        check("chunk with trailing header is accepted", ok4 and b4 == "hello")
+
+        let (_, ok5) = http.parseChunkedBody("zz\r\nhello\r\n0\r\n\r\n")
+        check("non-hex chunk size is refused", not ok5)
+
+        let (_, ok6) = http.parseChunkedBody("10\r\nhello\r\n0\r\n\r\n")
+        check("truncated chunk is refused", not ok6)
+
+        let (_, ok7) = http.parseChunkedBody("5\r\nhelloXX0\r\n\r\n")
+        check("missing CRLF delimiter is refused", not ok7)
+
+        let (_, ok8) = http.parseChunkedBody("5\r\nhello\r\n")
+        check("incomplete stream with no terminating chunk is refused", not ok8)
+
+        let (_, ok9) = http.parseChunkedBody("5\r\nhello\r\n0\r\n\r\n", maxBytes = 4)
+        check("stream exceeding maxBytes limit is refused", not ok9)
+
+        # Decoded payload byte accounting (raw is 14 bytes, payload is 5 bytes)
+        let (b10, ok10) = http.parseChunkedBody("5\r\nhello\r\n0\r\n\r\n", maxBytes = 5)
+        check("maxBytes enforces decoded payload size, not raw transport bytes", ok10 and b10 == "hello")
+
+        # Incremental parser resumption across multiple reads
+        var p: http.ChunkParser
+        var stream = "5\r\nhello\r\n"
+        p.feed(stream)
+        check("partial stream decodes first chunk and waits", p.body == "hello" and not p.done and not p.error)
+        stream.add "6\r\n world\r\n0\r\n\r\n"
+        p.feed(stream)
+        check("stream continuation appends only new chunk and finishes", p.body == "hello world" and p.done and not p.error)
+
+        # CRLF sanitization
+        let safeScope = rag.formatScope("f1\r\nX-Injected: 1", "p1\n", "w1")
+        check("formatScope strips carriage return and newline characters",
+              not safeScope.contains('\r') and not safeScope.contains('\n'))
+
+        # Early rejection of oversized declared chunk size before body data arrives
+        var pEarly: http.ChunkParser
+        pEarly.feed("1000000\r\n", maxBytes = 1000)
+        check("declared chunk size exceeding maxBytes fails immediately without body data",
+              pEarly.tooLarge and pEarly.error)
+
+        # Consumed byte removal and pos reset preserving unconsumed framing bytes
+        var pSlice: http.ChunkParser
+        var chunkBuf = "5\r\nhello\r\n5\r\nw"
+        pSlice.feed(chunkBuf)
+        check("first chunk decoded and pos set", pSlice.body == "hello" and pSlice.pos == 10)
+        chunkBuf = chunkBuf[pSlice.pos .. ^1]
+        pSlice.pos = 0
+        check("unconsumed framing preserved in buffer", chunkBuf == "5\r\nw")
+        chunkBuf.add "orld\r\n0\r\n\r\n"
+        pSlice.feed(chunkBuf)
+        if pSlice.pos > 0:
+          chunkBuf = chunkBuf[pSlice.pos .. ^1]
+          pSlice.pos = 0
+        check("resumed feed decodes second chunk and terminates",
+              pSlice.body == "helloworld" and pSlice.done and chunkBuf.len == 0)
+
       if bad == 0:
         echo "routes-selftest: PASS"
         quit(0)
@@ -7290,6 +7366,83 @@ proc main() =
 
         rag.forgetFile(rag.notePath(noteId))
         db.exec("DELETE FROM notes WHERE id=?", [noteId])
+
+      block retrievalScopingHierarchy:
+        proc scopeCheck(label: string, cond: bool, detail = "") =
+          if cond: echo "  ok   ", label
+          else:
+            echo "  FAIL ", label,
+                 (if detail.len > 0: "\n       " & detail else: "")
+            inc failures
+
+        db.exec("DELETE FROM workspaces WHERE id LIKE 'ragscope-%'")
+        db.exec("DELETE FROM projects WHERE id LIKE 'ragscope-%'")
+        db.exec("DELETE FROM folders WHERE id LIKE 'ragscope-%'")
+        db.exec("DELETE FROM notes WHERE id LIKE 'ragscope-%'")
+
+        db.exec("INSERT INTO workspaces (id, name, is_deleted) VALUES ('ragscope-w1', 'W1', 0)")
+        db.exec("INSERT INTO workspaces (id, name, is_deleted) VALUES ('ragscope-w2', 'W2', 0)")
+        db.exec("INSERT INTO projects (id, workspaceId, name, is_deleted) VALUES ('ragscope-p1', 'ragscope-w1', 'P1', 0)")
+        db.exec("INSERT INTO folders (id, projectId, name, is_deleted) VALUES ('ragscope-f1', 'ragscope-p1', 'F1', 0)")
+
+        db.exec("INSERT INTO notes (id, folderId, projectId, workspaceId, title, content, updatedAt, isFocusNote, is_deleted) " &
+                "VALUES ('ragscope-n-folder', 'ragscope-f1', 'ragscope-p1', 'ragscope-w1', 'Folder Note', 'scopemagic sapphire folder token', 0, 0, 0)")
+        db.exec("INSERT INTO notes (id, folderId, projectId, workspaceId, title, content, updatedAt, isFocusNote, is_deleted) " &
+                "VALUES ('ragscope-n-proj', '', 'ragscope-p1', 'ragscope-w1', 'Project Note', 'scopemagic emerald project token', 0, 0, 0)")
+        db.exec("INSERT INTO notes (id, folderId, projectId, workspaceId, title, content, updatedAt, isFocusNote, is_deleted) " &
+                "VALUES ('ragscope-n-ws', '', '', 'ragscope-w1', 'Workspace Note', 'scopemagic ruby workspace token', 0, 0, 0)")
+        db.exec("INSERT INTO notes (id, folderId, projectId, workspaceId, title, content, updatedAt, isFocusNote, is_deleted) " &
+                "VALUES ('ragscope-n-w2', '', '', 'ragscope-w2', 'W2 Note', 'scopemagic diamond w2 token', 0, 0, 0)")
+        db.exec("INSERT INTO notes (id, folderId, projectId, workspaceId, title, content, updatedAt, isFocusNote, is_deleted) " &
+                "VALUES ('ragscope-n-global', '', '', '', 'Global Note', 'scopemagic obsidian global token', 0, 0, 0)")
+
+        discard rag.indexContent(rag.notePath("ragscope-n-folder"), "scopemagic sapphire folder token")
+        discard rag.indexContent(rag.notePath("ragscope-n-proj"), "scopemagic emerald project token")
+        discard rag.indexContent(rag.notePath("ragscope-n-ws"), "scopemagic ruby workspace token")
+        discard rag.indexContent(rag.notePath("ragscope-n-w2"), "scopemagic diamond w2 token")
+        discard rag.indexContent(rag.notePath("ragscope-n-global"), "scopemagic obsidian global token")
+
+        proc hitPaths(scope: rag.ScopeContext): seq[string] =
+          for h in rag.query("scopemagic", topK = 10, withSnippets = false, scope = scope):
+            result.add h.path
+
+        let globalHits = hitPaths(rag.ScopeContext())
+        scopeCheck("global scope retrieves global note", rag.notePath("ragscope-n-global") in globalHits)
+        scopeCheck("global scope strictly isolates from workspace notes",
+                   rag.notePath("ragscope-n-ws") notin globalHits and
+                   rag.notePath("ragscope-n-proj") notin globalHits and
+                   rag.notePath("ragscope-n-folder") notin globalHits and
+                   rag.notePath("ragscope-n-w2") notin globalHits)
+
+        let wsScope = rag.parseScope("workspace=ragscope-w1")
+        let wsHits = hitPaths(wsScope)
+        scopeCheck("workspace scope retrieves workspace note", rag.notePath("ragscope-n-ws") in wsHits)
+        scopeCheck("workspace scope retrieves project sub-note", rag.notePath("ragscope-n-proj") in wsHits)
+        scopeCheck("workspace scope retrieves folder sub-note", rag.notePath("ragscope-n-folder") in wsHits)
+        scopeCheck("workspace scope excludes other workspace note", rag.notePath("ragscope-n-w2") notin wsHits)
+        scopeCheck("workspace scope excludes global note", rag.notePath("ragscope-n-global") notin wsHits)
+
+        let projScope = rag.parseScope("project=ragscope-p1;workspace=ragscope-w1")
+        let projHits = hitPaths(projScope)
+        scopeCheck("project scope retrieves project note", rag.notePath("ragscope-n-proj") in projHits)
+        scopeCheck("project scope retrieves folder sub-note", rag.notePath("ragscope-n-folder") in projHits)
+        scopeCheck("project scope excludes workspace root note", rag.notePath("ragscope-n-ws") notin projHits)
+        scopeCheck("project scope excludes other workspace note", rag.notePath("ragscope-n-w2") notin projHits)
+        scopeCheck("project scope excludes global note", rag.notePath("ragscope-n-global") notin projHits)
+
+        let folderScope = rag.parseScope("folder=ragscope-f1;project=ragscope-p1;workspace=ragscope-w1")
+        let folderHits = hitPaths(folderScope)
+        scopeCheck("folder scope retrieves folder note", rag.notePath("ragscope-n-folder") in folderHits)
+        scopeCheck("folder scope excludes project root note", rag.notePath("ragscope-n-proj") notin folderHits)
+        scopeCheck("folder scope excludes workspace root note", rag.notePath("ragscope-n-ws") notin folderHits)
+        scopeCheck("folder scope excludes global note", rag.notePath("ragscope-n-global") notin folderHits)
+
+        for id in ["ragscope-n-folder", "ragscope-n-proj", "ragscope-n-ws", "ragscope-n-w2", "ragscope-n-global"]:
+          rag.forgetFile(rag.notePath(id))
+        db.exec("DELETE FROM workspaces WHERE id LIKE 'ragscope-%'")
+        db.exec("DELETE FROM projects WHERE id LIKE 'ragscope-%'")
+        db.exec("DELETE FROM folders WHERE id LIKE 'ragscope-%'")
+        db.exec("DELETE FROM notes WHERE id LIKE 'ragscope-%'")
 
       if failures == 0:
         echo ""

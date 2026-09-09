@@ -367,7 +367,7 @@ proc trimHistory*(messages: JsonNode, budgetBytes: int):
 ## rewritten body and its cache key. A body that is not a chat request passes
 ## through untouched — the raw-prompt endpoints have no messages to inject into,
 ## and that check is here rather than at each caller.
-proc prepare*(rawBody: string, projectRoot = ""): Prepared =
+proc prepare*(rawBody: string, projectRoot = "", scope: ScopeContext = ScopeContext()): Prepared =
   result.body = rawBody
 
   var req: JsonNode
@@ -417,7 +417,7 @@ proc prepare*(rawBody: string, projectRoot = ""): Prepared =
     let limit = ragLimitFor(intent, large)
     if limit > 0:
       let hits = rag.query(query, topK = limit, withSnippets = true,
-                           pathFilter = projectRoot)
+                           pathFilter = projectRoot, scope = scope)
       result.ragHits = hits.len
       # Action purpose: the hits are kept, not only counted. `rag.query` has
       # always returned the path and the three scores and every caller

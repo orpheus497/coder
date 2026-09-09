@@ -88,17 +88,12 @@ is what makes "the daemon is up" and "the client port answers" incapable of disa
   walk out of the served root.
 - The render path never does work proportional to a payload; the memos exist for that and
   are capped.
+- Partial entity updates preserve existing stored fields across both in-process and HTTP `/api/db/*` writes (merged in `api.upsert`).
+- Retrieval scoping enforces strict down-tree container isolation via `X-Jenova-Scope`: non-workspace queries strictly isolate from workspace folders; workspace scopes search descendant projects/folders; project scopes search child folders; folder scopes confine to that folder.
+- HTTP request parsing decodes both chunked transfer encoding and content-length bounded bodies up to `MaxBodyBytes`.
 
 ## Known architectural debts
 
-- **Retrieval scoping contract (ruled):** RAG search follows a strict container tree:
-  No workspace (only non-workspace chats and unfiled artifacts, completely isolated from workspaces) →
-  Workspace (workspace and all descendant projects/folders) →
-  Project (project and its child folders) →
-  Folder (only that folder).
-  Wired via `X-Jenova-Scope` header carrying container hierarchy to `pipeline.prepare`.
-- **Partial writes differ by surface (ruled):** Merge logic moves into `upsert`, so omitted
-  columns preserve existing stored values across both in-process and HTTP `/api/db/*` writes.
 - **The maths engine is not linked into the window.** The parser, layout and font probe
   are written and asserted, and nothing in `gui.nim` can reach them.
 - **The render memos are conversation-scaled, not viewport-scaled**, now that the

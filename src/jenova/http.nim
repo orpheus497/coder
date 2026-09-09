@@ -55,6 +55,71 @@ proc readHead(sock: Socket): (string, string) =
     raise newException(HttpError, "connection closed before request")
   raise newException(HttpError, "malformed request: no header terminator")
 
+type
+  ChunkParser* = object
+    pos*: int
+    body*: string
+    done*: bool
+    error*: bool
+    tooLarge*: bool
+
+## Function purpose: parses incoming chunked bytes incrementally, resuming from the previous position.
+proc feed*(parser: var ChunkParser, raw: string, maxBytes = MaxBodyBytes) =
+  if parser.done or parser.error: return
+  while parser.pos < raw.len:
+    let lineEnd = raw.find("\r\n", parser.pos)
+    if lineEnd < 0:
+      if raw.len - parser.pos > MaxHeadBytes:
+        parser.error = true
+      return
+    var sizeStr = raw[parser.pos ..< lineEnd].strip()
+    let semi = sizeStr.find(';')
+    if semi >= 0:
+      sizeStr = sizeStr[0 ..< semi].strip()
+    if sizeStr.len == 0:
+      parser.error = true
+      return
+    let chunkSize = try: parseHexInt(sizeStr) except ValueError: -1
+    if chunkSize < 0:
+      parser.error = true
+      return
+    if chunkSize == 0:
+      let rest = raw[lineEnd + 2 .. ^1]
+      if rest.startsWith("\r\n"):
+        parser.done = true
+        parser.pos = lineEnd + 4
+        return
+      let trailerEnd = rest.find("\r\n\r\n")
+      if trailerEnd >= 0:
+        parser.done = true
+        parser.pos = lineEnd + 2 + trailerEnd + 4
+        return
+      if rest.len > MaxHeadBytes:
+        parser.error = true
+      return
+    if chunkSize > maxBytes - parser.body.len:
+      parser.tooLarge = true
+      parser.error = true
+      return
+    let dataStart = lineEnd + 2
+    let dataEnd = dataStart + chunkSize
+    if raw.len - dataEnd < 2:
+      return
+    if raw[dataEnd] != '\r' or raw[dataEnd + 1] != '\n':
+      parser.error = true
+      return
+    parser.body.add raw[dataStart ..< dataEnd]
+    parser.pos = dataEnd + 2
+
+## Function purpose: decodes a chunked transfer-encoded byte stream from a string buffer.
+proc parseChunkedBody*(raw: string, maxBytes = MaxBodyBytes): tuple[body: string, ok: bool] =
+  var p = ChunkParser()
+  p.feed(raw, maxBytes)
+  if p.done and not p.error:
+    (p.body, true)
+  else:
+    ("", false)
+
 ## Function purpose: reads only what this server acts on — method, target,
 ## headers, body. An unparseable request raises rather than yielding a partly
 ## filled `Request` that a caller might act on.
@@ -83,38 +148,59 @@ proc parseRequest*(sock: Socket): Request =
     if c > 0:
       result.headers[line[0 ..< c].strip.toLowerAscii] = line[c + 1 .. ^1].strip
 
-  let clen = try: parseInt(result.headers.getOrDefault("content-length", "0"))
-             except ValueError: 0
-  if clen > MaxBodyBytes:
-    # Action purpose: the body is drained before the refusal is raised, and the
-    # 413 is worthless without it. `Content-Length` arrives with the head, so
-    # this is decided while the sender is still writing, and closing on a peer
-    # mid-write hands it a reset instead of the response — the client then
-    # reports a connection failure and the reason never reaches the user.
-    #
-    # Discarded as it arrives rather than accumulated: the cap exists to keep
-    # this body out of memory, and buffering it to drain it would defeat that.
-    var drained = leftover.len
-    var sink = newString(4096)
-    while drained < clen and drained < MaxDrainBytes:
-      let want = min(sink.len, min(clen, MaxDrainBytes) - drained)
-      let n = sock.recv(addr sink[0], want)
+  let isChunked = result.headers.getOrDefault("transfer-encoding", "").toLowerAscii.contains("chunked")
+  if isChunked:
+    var parser = ChunkParser()
+    var raw = leftover
+    while true:
+      parser.feed(raw, MaxBodyBytes)
+      if parser.pos > 0:
+        raw = raw[parser.pos .. ^1]
+        parser.pos = 0
+      if parser.done or parser.error:
+        break
+      var buf = newString(4096)
+      let n = sock.recv(addr buf[0], buf.len)
       if n <= 0: break
-      drained += n
+      raw.add buf[0 ..< n]
+    if parser.tooLarge:
+      raise newException(BodyTooLargeError, "chunked request body exceeded limit")
+    if not parser.done or parser.error:
+      raise newException(HttpError, "malformed or incomplete chunked request body")
+    result.body = parser.body
+  else:
+    let clen = try: parseInt(result.headers.getOrDefault("content-length", "0"))
+               except ValueError: 0
+    if clen > MaxBodyBytes:
+      # Action purpose: the body is drained before the refusal is raised, and the
+      # 413 is worthless without it. `Content-Length` arrives with the head, so
+      # this is decided while the sender is still writing, and closing on a peer
+      # mid-write hands it a reset instead of the response — the client then
+      # reports a connection failure and the reason never reaches the user.
+      #
+      # Discarded as it arrives rather than accumulated: the cap exists to keep
+      # this body out of memory, and buffering it to drain it would defeat that.
+      var drained = leftover.len
+      var sink = newString(4096)
+      while drained < clen and drained < MaxDrainBytes:
+        let want = min(sink.len, min(clen, MaxDrainBytes) - drained)
+        let n = sock.recv(addr sink[0], want)
+        if n <= 0: break
+        drained += n
 
-    # Action purpose: both numbers are in the message because this is a failure
-    # the user can act on, and the margin decides whether they drop an
-    # attachment or start a new conversation.
-    const Mib = 1024 * 1024
-    raise newException(BodyTooLargeError,
-      "request body is " & $((clen + Mib - 1) div Mib) &
-      " MB and the limit is " & $(MaxBodyBytes div Mib) & " MB")
-  result.body = leftover
-  while result.body.len < clen:
-    var chunk = newString(min(4096, clen - result.body.len))
-    let n = sock.recv(addr chunk[0], chunk.len)
-    if n <= 0: break
-    result.body.add chunk[0 ..< n]
+      # Action purpose: both numbers are in the message because this is a failure
+      # the user can act on, and the margin decides whether they drop an
+      # attachment or start a new conversation.
+      const Mib = 1024 * 1024
+      raise newException(BodyTooLargeError,
+        "request body is " & $((clen + Mib - 1) div Mib) &
+        " MB and the limit is " & $(MaxBodyBytes div Mib) & " MB")
+    result.body = leftover
+    while result.body.len < clen:
+      var chunk = newString(min(4096, clen - result.body.len))
+      let n = sock.recv(addr chunk[0], chunk.len)
+      if n <= 0: break
+      result.body.add chunk[0 ..< n]
 
 ## Function purpose: decodes only the two escapes a query string uses, and
 ## leaves a malformed `%` sequence as literal text rather than raising — a bad

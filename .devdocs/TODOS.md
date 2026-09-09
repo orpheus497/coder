@@ -2,28 +2,16 @@
 
 ## Active
 
-*(empty — see `PROGRESS.md` for what was completed this session)*
+*(No active tasks currently scoped in PLANS.md)*
 
 ## Backlog
 
-### Ruled and Ready for Implementation
+### Ruled Policies
 
-- **D6 — partial-node merge in `upsert`.** Ruled: move row merge into `api.upsert` so partial
-  JSON updates preserve stored columns across both HTTP and in-process writes.
-- **D5 — retrieval scoping hierarchy.** Ruled: RAG strictly scopes down the container tree:
-  Non-workspace (only non-workspace chats & unfiled artifacts) → Workspace (workspace & subfolders) →
-  Workspace Project (project & subfolders) → Project Sub-folder (only folder contents). Wire via
-  `X-Jenova-Scope` header carrying container hierarchy.
 - **V-17 — documentation citation policy.** Ruled: zero citations, labels, or document cross-references
   in code comments. Citations live strictly in `.devdocs/` as reference material.
 
 ### Defects
-
-- **D9 — no chunked request bodies.** `http.parseRequest` reads `Content-Length` only, and
-  `upstream.buildRequest` strips `transfer-encoding` from what it forwards, so a chunked
-  POST is read as an empty body rather than refused. Low reach — the frozen client sends
-  `Content-Length` — but the failure is silent, which is the part worth closing. The
-  dechunker should be factored pure so it is assertable without a socket.
 - **The two races report 03 deferred remain open.** `rag.query` now filters deleted rows,
   which was named as their shared root, so a stale hit is no longer *returned*. The races
   themselves — `forgetMessage` against restore-and-update indexing, and descendant discovery
@@ -62,8 +50,5 @@
 *(The corrections listed here were made on 2026-09-09 — see `PROGRESS.md`. What remains is
 the class, not the instances.)*
 
-- **V-17 needs a ruling.** Correcting citations a fourth time will not hold. Either cite the
-  symbol beside the line, with a gate that fails when the symbol moves, or drop line numbers
-  from prose and keep them only where a report quotes source verbatim.
 - Report 08 §5's landing sites for M-3 are accurate and none has been taken; leave the plan
   and take the work rather than restating it.

@@ -3,6 +3,11 @@
 Milestone ledger. One line per completed, superseded or removed feature or bug.
 Newest first.
 
+- 2026-09-09T23:22Z — Chunk parser hardening in http.nim: validated declared chunk size before body reads, subtracted dataEnd to avoid 64-bit overflow, and pruned consumed bytes from raw after each feed call. Gated by 4 new assertions in routes-selftest (36 total).
+- 2026-09-09T23:13Z — Review fixes applied: AGENTS.md canonical UTC timestamp and approval text cleanup, rag.nim preloaded container scopes and vector scan reordering, gui.nim CRLF sanitization on scopeHeader, and http.nim incremental ChunkParser with decoded payload byte accounting. Gated by 4 new assertions in routes-selftest.
+- 2026-09-09T22:59Z — D9: pure chunked request body parser implemented in http.nim with MaxBodyBytes cap and streaming socket reader in parseRequest. Gated by 9 new assertions in routes-selftest.
+- 2026-09-09T22:57Z — D5: hierarchical retrieval scoping and X-Jenova-Scope wire contract implemented across rag, pipeline, server, and gui. Non-workspace isolation and down-tree folder/project/workspace ladder enforced. Gated by 16 new assertions in rag-selftest.
+- 2026-09-09T22:50Z — D6: partial-node merge moved into api.upsert. HTTP POST /api/db/* updates omitting columns now preserve existing stored data (e.g. content), unifying in-process and HTTP update semantics. Gated by two new assertions in workspace-selftest.
 - 2026-09-09T22:35Z — Architectural rulings established: D5 retrieval scoping hierarchy (non-workspace isolation down to folder scope), D6 partial-node merge in `upsert`, and V-17 strict ban on citations in code comments.
 - 2026-09-09T22:23Z — `.devdocs/` audit and hygiene: corrected false claim that `relay-selftest` binds a listener (it asserts `spliceHeaders` on pure strings in memory), clarified Linux-container-on-FreeBSD environment context, confirmed `AGENTS.md` tracked and committed in `5606d418`, and cleared executed items from `PLANS.md`.
 - 2026-09-09T05:43Z — `AGENTS.md`'s budget rule states what it requires. The sentence ended

@@ -149,6 +149,7 @@ type
     host: string
     port: int
     body: string
+    scopeHeader: string
 
   ControlJob = object
     action: string
@@ -293,11 +294,18 @@ proc streamOnce(job: StreamJob) =
     sock = newSocket()
     sock.connect(job.host, Port(job.port))
     streamFd.store(sock.getFd().int)
-    sock.send("POST /v1/chat/completions HTTP/1.1\r\n" &
-              "Host: " & job.host & "\r\n" &
-              "Content-Type: application/json\r\n" &
-              "Connection: close\r\n" &
-              "Content-Length: " & $job.body.len & "\r\n\r\n" & job.body)
+    var reqStr = "POST /v1/chat/completions HTTP/1.1\r\n" &
+                 "Host: " & job.host & "\r\n" &
+                 "Content-Type: application/json\r\n" &
+                 "Connection: close\r\n"
+    if job.scopeHeader.len > 0:
+      var safeScope = ""
+      for c in job.scopeHeader:
+        if c notin {'\r', '\n'}: safeScope.add c
+      if safeScope.len > 0:
+        reqStr.add "X-Jenova-Scope: " & safeScope & "\r\n"
+    reqStr.add "Content-Length: " & $job.body.len & "\r\n\r\n" & job.body
+    sock.send(reqStr)
 
     let statusLine = sock.recvLine(timeout = 120_000)
     let parts = statusLine.split(' ')
@@ -2181,9 +2189,11 @@ proc postConversation(app: AppState, continuing = false) =
   # of its own. An unassigned chat resolves to the global scope, which is *not*
   # everything — see `workspace.contextFor`.
   var wsCtx = ""
+  var scopeHdr = ""
   for c in app.convs:
     if c.id == app.convId:
       wsCtx = workspace.contextFor(c.folderId, c.projectId, c.workspaceId)
+      scopeHdr = rag.formatScope(c.folderId, c.projectId, c.workspaceId)
       break
   let body = pipeline.chatBody(msgs, continuing, app.opts, wsCtx)
   # Action purpose: measured after `chatBody`, so it counts the workspace
@@ -2197,7 +2207,7 @@ proc postConversation(app: AppState, continuing = false) =
   # so a generation that fails before a response head leaves the panel empty
   # instead of describing the turn before it.
   app.diag = inspect.Diagnostics()
-  streamReq.send(StreamJob(host: "127.0.0.1", port: port, body: body))
+  streamReq.send(StreamJob(host: "127.0.0.1", port: port, body: body, scopeHeader: scopeHdr))
 
 ## Function purpose: a conversation's name, taken from the message that started
 ## it. The Web UI titles a chat from its first message and this window

@@ -390,6 +390,34 @@ rows over current ones.
 
 ---
 
+## A tenth pass, 2026-09-09 — read against the source rather than against this file
+
+Five findings of exactly the classes this report tracks, none of them recorded here before,
+all found by reading the request path module by module. They are fixed; the ledger entry is
+`.devdocs/PROGRESS.md` and the narrative is `.devdocs/SESSION_HANDOFF.md`, so the detail lives in
+one place rather than two that drift.
+
+| # | Finding | Class |
+|---|---|---|
+| **T-1** | **A turn carrying an attachment bypassed the whole pipeline.** `pipeline.contentFor` emits an OpenAI content *array* for such a turn and `prepare` read that content with `getStr`, which answers empty for an array — so every enrichment sat behind a length test no attachment turn could pass. No persona, no retrieval, no web search, no editor document, and the intent prefix neither detected nor stripped. Both surfaces, since the frozen client sends the same shape | wiring |
+| **T-2** | **`workspace.contextFor` read every note and file asset body on every send, on the GTK thread.** The same defect R-13 fixed in `backfillWorkspace` — "selecting the content alongside the id list holds the whole table at once" — never applied to the hot path, where it also blocks the frame | memory |
+| **T-3** | **That block is appended to the system message, which `trimHistory` never drops.** So once the workspace dump alone exceeded the budget, every turn discarded the entire conversation and was *still* over budget — with `X-Jenova-Trimmed` reporting the loss against a history that was not the cause. The one diagnostic whose purpose is to report silent conversation loss truthfully, misattributing it. Two modules each correct alone | memory |
+| **T-4** | **`/v1/embeddings` was relayed to the chat backend.** `routes.classify` tests `/v1/` before the embed prefixes. Retrieval was unaffected — `rag.embed` calls that port directly — so this was the external OpenAI surface only | wiring |
+| **T-5** | **`db.queryBlob` returned a truncated result set as a complete one.** `query` raises on a step code that is neither `ROW` nor `DONE`; `queryBlob` broke out of its loop. Its only caller is the retrieval vector scan, so a locked database degraded ranking invisibly | error |
+
+**T-3 is the one worth carrying forward as a lesson.** `trimHistory` is right to refuse to drop a
+system message and `contextFor` was right about what belongs in one; the defect existed only in
+the join, which neither module's own reading could reach. Both files' headers described their half
+accurately — `workspace.nim`'s even named the missing budget as a known limit — and no reader of
+either would have found it.
+
+Two further findings from the same pass are **not** taken, because each changes a contract rather
+than repairing a defect, and both are in `.devdocs/DECISIONS_LOG.md` awaiting a ruling: retrieval
+is never scoped (`prepare` takes a `projectRoot` no caller passes), and the partial-node merge
+protects the window's writes but not the HTTP route's.
+
+---
+
 ## Session 3 — a wiring sweep, and what it found
 
 The trackers above were built by reading the code against the documentation. This pass asked a
@@ -1174,8 +1202,10 @@ worth fixing rather than each caller. Recorded as the next retrieval question.
 
 ### What was run
 
-`nimble core`, `nimble gui`, all **20** `-selftest` subcommands, `tests/gui_check.sh`, and the six
-`tests/test_*.sh` suites — all green, and re-run after the seventh pass. `bin/jenova --check` passes, and so does the panel-open
+`nimble core`, `nimble gui`, every `-selftest` subcommand, `tests/gui_check.sh`, and the six
+`tests/test_*.sh` suites — all green, and re-run after the seventh pass. *(This said "all 20".
+There were 21 at the time and there are 22 now, `routes` having been added on 2026-09-09. A count
+written into prose is a number nothing re-derives, which is the V-17 class in a different field.)* `bin/jenova --check` passes, and so does the panel-open
 variant with all nine guards forced true, with no GTK criticals and no markup errors. The
 mapped-window half of `tests/gui_build.sh` still cannot run here — but **for one reason, not
 three.** `xdotool` (4.20260303.1) and `xclip` (0.13) are both installed at `/usr/local/bin`, as are

@@ -18,7 +18,7 @@ Every gap below cites the source on both sides. Nothing is asserted from a scree
 
 | | Web UI | Desktop window |
 |---|---|---|
-| Implementation | `jca_web/src` — ~19.6k lines of Svelte + ~13.3k lines of stores/services | `src/jenova/gui.nim` — 5,212 lines, plus linked modules |
+| Implementation | `jca_web/src` — ~19.6k lines of Svelte + ~13.3k lines of stores/services | `src/jenova/gui.nim` — 7,246 lines, plus linked modules |
 | Chat transport | `fetch` → `:8080/v1/chat/completions` | raw socket → `127.0.0.1:$PORT/v1/chat/completions` (`src/jenova/gui.nim:272-397`) |
 | Persistence | server SQLite via `/api/db/*` | the **same** `api.nim` procs, called in-process |
 | Tool/agent loop | client-side, in `agentic.svelte.ts` (772 lines) | none |
@@ -211,14 +211,17 @@ decision 1 and planned in `.devdocs/08-math-rendering.md`. Against that plan's f
 * **M-2 shipped** — `src/jenova/mathtex.nim` (1,293 lines) parses to a tree and lays out to boxes
   over TeXbook Appendix G rules, with `renderMath` at `:1258`. No drawing at all, by design, and
   asserted as numbers by `math-selftest`.
-* **M-3 half shipped** — `src/jenova/mathfont.nim` (391 lines) is the font probe and constants
-  reader. **The Cairo draw is the open half**: `renderMath` has exactly one caller in the tree
-  (`src/jenova_core.nim:1959`, the self-test), so display maths is laid out and not yet painted.
+* **M-3 half shipped** — `src/jenova/mathfont.nim` (568 lines) is the font probe and the MATH
+  constants reader, filling `mathtex`'s own `MathConstants` rather than a second declaration of it.
 * **M-4 open** — alignment, `\begin{align}`, spacing classes, and the `docs/usage.md` statement of
   the supported subset.
 
-**What remains of this row is M-3's draw and M-4.** Report 08 is the live plan and is accurate;
-this row is the parity view of it.
+**What remains is more than "the draw", and this row said otherwise for three sessions.**
+`gui.nim` imports neither `mathtex` nor `mathfont`, and `markdown.BlockKind` has no `bkMath`, so
+the whole of Tier 2 — 1,861 lines — is reachable only from `jenova_core.nim`'s self-tests and
+nothing in the window can reach it. The remainder is the import, the fourth block kind, the branch
+that builds it, the Cairo draw, and then M-4. Report 08's §5 lists exactly these landing sites;
+what neither document recorded is that none of them had been taken.
 
 ### P-A6 — Fork from a message, with options · size: small · **fixed**
 
@@ -457,7 +460,7 @@ Recording these matters: parity work must not regress them, and they are the see
 | 6 | Embedded Neovim page (VTE) and the `Editor:` live-document intent | `src/jenova/vte.nim`, `src/jenova/nvimctl.nim`, `src/jenova/pipeline.nim:403` |
 | 7 | Cascade-aware delete confirmations that count what will go | `src/jenova/api.nim:98` |
 | 8 | Chat attachments filed as workspace `fileAssets` rows | `src/jenova/gui.nim:1956` |
-| 9 | Native canvas at 5,212 lines of GTK with no browser runtime | `src/jenova/canvas.nim` |
+| 9 | Native canvas drawn straight onto Cairo, with no browser runtime | `src/jenova/canvas.nim` (145 lines — the 5,212 this row used to carry was `gui.nim`'s length at audit time, since grown to 7,246) |
 | 10 | Backend crash diagnosis from the log tail, surfaced in the window | `src/jenova/gui.nim:724-756` |
 
 ---

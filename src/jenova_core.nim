@@ -38,7 +38,7 @@ import jenova/[paths, config, db, dbselftest, server, serverselftest, markdown,
                rag, sha256, pipeline, prompts, lifecycle, models, nvimctl, api,
                settings, hardware, workspace, pdf, zlib, fssync, composer, convmd,
                assetview, http, upstream, websearch, version, inspect, mathtex,
-               mathfont]
+               mathfont, routes]
 
 const
   Version = version.Version
@@ -76,7 +76,8 @@ proc usage() =
   echo "              attach-selftest, workspace-selftest, nvim-env-selftest,"
   echo "              models-selftest, fs-selftest, composer-selftest,"
   echo "              convmd-selftest, asset-selftest, lifecycle-selftest,"
-  echo "              relay-selftest, inspect-selftest, math-selftest"
+  echo "              relay-selftest, inspect-selftest, math-selftest,"
+  echo "              routes-selftest"
   echo ""
   echo "Precedence: builtin default < etc/jenova.conf < etc/jenova.local.conf < environment"
   echo "JENOVA_NO_BACKENDS=1  serve without starting llama-server (used by the tests)"
@@ -1898,6 +1899,69 @@ proc main() =
               "<i>x</i><span rise='6000' size='smaller'>2</span>",
               (if cells.len == 1: cells[0].rows[0][0] else: $cells.len))
 
+        # Action purpose: display math fences must split into bkMath blocks,
+        # while unclosed streaming fences remain bkText so subsequent tokens flow.
+        let dispSingle = markdown.parse("$$x = 1$$")
+        check("single-line dollar display math becomes bkMath",
+              dispSingle.len == 1 and dispSingle[0].kind == markdown.bkMath and
+              dispSingle[0].text == "x = 1",
+              (if dispSingle.len == 1: $dispSingle[0].kind & " " & dispSingle[0].text else: $dispSingle.len))
+
+        let dispBracket = markdown.parse("\\[x = 1\\]")
+        check("single-line bracket display math becomes bkMath",
+              dispBracket.len == 1 and dispBracket[0].kind == markdown.bkMath and
+              dispBracket[0].text == "x = 1",
+              (if dispBracket.len == 1: $dispBracket[0].kind & " " & dispBracket[0].text else: $dispBracket.len))
+
+        let dispMulti = markdown.parse("$$\\frac{a}{b}\n+ c$$")
+        check("multi-line dollar display math becomes bkMath",
+              dispMulti.len == 1 and dispMulti[0].kind == markdown.bkMath and
+              dispMulti[0].text == "\\frac{a}{b}\n+ c",
+              (if dispMulti.len == 1: dispMulti[0].text else: $dispMulti.len))
+
+        let dispMultiBracket = markdown.parse("\\[\\frac{a}{b}\n+ c\\]")
+        check("multi-line bracket display math becomes bkMath",
+              dispMultiBracket.len == 1 and dispMultiBracket[0].kind == markdown.bkMath and
+              dispMultiBracket[0].text == "\\frac{a}{b}\n+ c",
+              (if dispMultiBracket.len == 1: dispMultiBracket[0].text else: $dispMultiBracket.len))
+
+        let mixed = markdown.parse("before\n$$E = mc^2$$\nafter")
+        check("display math separates surrounding prose into distinct blocks",
+              mixed.len == 3 and mixed[0].kind == markdown.bkText and
+              mixed[1].kind == markdown.bkMath and mixed[1].text == "E = mc^2" and
+              mixed[2].kind == markdown.bkText,
+              $mixed.len)
+
+        let halfOpen = markdown.parse("$$\\frac{a}{b}")
+        check("an unclosed display math fence while streaming remains bkText",
+              halfOpen.len == 1 and halfOpen[0].kind == markdown.bkText and
+              halfOpen[0].text.contains("$$"),
+              (if halfOpen.len == 1: $halfOpen[0].kind & " " & halfOpen[0].text else: $halfOpen.len))
+
+        # Action purpose: an empty fence is text. Worth asserting because the
+        # alternative is silent: a consumed fence, no block, and a line that
+        # leaves the message with no trace anywhere that it was there.
+        let emptyDollar = markdown.parse("$$$$")
+        check("an empty dollar display fence stays text rather than vanishing",
+              emptyDollar.len == 1 and emptyDollar[0].kind == markdown.bkText and
+              emptyDollar[0].text.contains("$$"),
+              (if emptyDollar.len == 1: $emptyDollar[0].kind & " " & emptyDollar[0].text
+               else: $emptyDollar.len))
+
+        let emptyBracket = markdown.parse("\\[\\]")
+        check("an empty bracket display fence stays text rather than vanishing",
+              emptyBracket.len == 1 and emptyBracket[0].kind == markdown.bkText and
+              emptyBracket[0].text.len > 0,
+              (if emptyBracket.len == 1: $emptyBracket[0].kind & " " & emptyBracket[0].text
+               else: $emptyBracket.len))
+
+        let emptyPair = markdown.parse("before\n$$\n$$\nafter")
+        check("an empty multi-line fence keeps its lines and its prose",
+              emptyPair.len >= 1 and emptyPair[0].kind == markdown.bkText and
+              emptyPair[0].text.contains("before") and
+              emptyPair[^1].text.contains("after"),
+              $emptyPair.len)
+
       if bad == 0:
         echo ""
         echo "markdown-selftest: PASS"
@@ -2482,6 +2546,39 @@ proc main() =
               near(only(lay("\\frac{1}{2}").box).ascent,
                    only(lay("\\frac{1}{2}").box).ascent))
 
+      # Action purpose: a size variant has no codepoint — nothing names
+      # `parenleft.size3` — so the index its metrics were read from is the only
+      # way to ask a face for that shape. Asserted on the carry rather than on
+      # a face, which is what keeps this a test with no font in it.
+      block theChosenVariantCarriesItsFaceIndex:
+        let numbered = proc (text: string,
+                             size: float): seq[mathtex.MathVariant] =
+          if text notin stretchy: return @[]
+          for i, factor in StretchAt:
+            let ext = factor * size
+            result.add mathtex.MathVariant(
+              width: 0.5 * size, ascent: 0.8 * ext, descent: 0.2 * ext,
+              italicCorrection: 0.0, glyph: uint32(700 + i))
+        let idFont = mathtex.MathFont(constants: mc, measure: measure,
+                                      variants: numbered)
+        let grown = only(mathtex.renderMath("\\left(\\frac{1}{2}\\right)",
+                                            idFont, Size, true).box)
+        check("a grown delimiter carries the index of the variant it measured",
+              grown.children[0].variantGlyph ==
+                700'u32 + uint32(grown.children[0].variant),
+              $grown.children[0].variantGlyph & " for variant " &
+                $grown.children[0].variant)
+        let assembled = only(mathtex.renderMath(
+          "\\left(\\frac{\\frac{1}{2}}{\\frac{1}{2}}\\right)",
+          idFont, Size, true).box)
+        check("...and so does the largest, where none is tall enough",
+              assembled.children[0].variantGlyph ==
+                700'u32 + uint32(StretchAt.len - 1),
+              $assembled.children[0].variantGlyph)
+        check("a synthesised variant list names no glyph, so the text is drawn",
+              only(lay("\\left(\\frac{1}{2}\\right)").box)
+                .children[0].variantGlyph == 0'u32)
+
       # Action purpose: **the layout is driven by the table `mathfont` actually
       # produces, not only by the fixture above.** Every assertion up to here
       # uses a hand-written `MathConstants` of round numbers, which is what
@@ -2525,6 +2622,21 @@ proc main() =
         check("a displayed radical is taller than the same one inline",
               dispR.box.ascent > inlineR.box.ascent,
               $dispR.box.ascent & " vs " & $inlineR.box.ascent)
+
+        # Action purpose: verify that buildMathLayoutFont and chooseFont assemble
+        # functional measure and variant closures without manual test mocks.
+        block liveFontAssemblyLaysOut:
+          var (found, chosen) = mathfont.chooseFont()
+          defer:
+            if found: chosen.close()
+          let layoutFont = if found: mathfont.buildMathLayoutFont(chosen)
+                           else: mathfont.buildDefaultMathFont()
+          let liveLaid = mathtex.renderMath("\\frac{x^2 + 1}{\\sqrt{y}}", layoutFont, Size, true)
+          check("buildMathLayoutFont assembles a layout font that lays out successfully",
+                liveLaid.ok, "renderMath refused live font layout")
+          check("live font layout box has non-zero width and height",
+                liveLaid.box.width > 0.0 and liveLaid.box.ascent > 0.0,
+                $liveLaid.box.width & " x " & $liveLaid.box.ascent)
 
       if bad == 0:
         echo ""
@@ -2711,6 +2823,36 @@ proc main() =
         check("no second system message is inserted",
               parsed["messages"].len == 2)
 
+      # Action purpose: the block this builds is appended to the system message,
+      # and `pipeline.trimHistory` never drops one — so an unbounded block made
+      # every turn discard the whole conversation and still exceed the context,
+      # with the trim counted against a history that was not the cause. The
+      # budget is a parameter so the property can be asserted without a fixture
+      # large enough to matter at the shipped ceiling.
+      block theContextIsBounded:
+        db.exec("DELETE FROM notes WHERE id='wst-big'", [])
+        addNote("wst-big", "Huge", repeat("x", 20_000), "wst-fA1", "", "", 0)
+
+        let small = workspace.contextFor("wst-fA1", "", "", maxBytes = 2_000)
+        check("an artefact over the budget is not emitted",
+              "xxxxxxxxxx" notin small)
+        # Skipped and counted, never shortened: a truncated note reads as a
+        # whole one and is answered as though it were.
+        check("...and the block says it left one out",
+              "omitted to fit the context budget" in small, small)
+        check("the block stays within its budget and its headings",
+              small.len < 2_500, $small.len)
+        # A FOCUS note is a rule and the rest is material, so the budget is spent
+        # in that order — a workspace whose notes overflow still answers under
+        # its own rules.
+        check("a FOCUS rule survives a budget its notes exhaust",
+              "always use tabs" in small, small)
+
+        let full = workspace.contextFor("wst-fA1", "", "")
+        check("the same artefact is emitted under the shipped ceiling",
+              "xxxxxxxxxx" in full)
+        db.exec("DELETE FROM notes WHERE id='wst-big'", [])
+
       # Action purpose: every block above supplies its own rows
       # with raw SQL, so not one of them could see that saving a note through
       # the window's own write path blanked `isFocusNote` and silently demoted
@@ -2750,6 +2892,14 @@ proc main() =
         check("a node omitting the content is accepted",
               api.putEntity("notes", %*{"id": fixture, "title": "Rules II"}))
         check("...and the content it never mentioned survives",
+              rule in workspace.contextFor("wst-fA1", "", ""))
+
+        let httpRes = api.handleDb(http.Request(
+          meth: "POST",
+          path: "/api/db/notes",
+          body: $(%*{"id": fixture, "title": "Rules III"})))
+        check("an HTTP partial update is accepted", httpRes.status == 200)
+        check("...and the HTTP partial update preserves omitted content",
               rule in workspace.contextFor("wst-fA1", "", ""))
 
         # A transition, not a state: set → carried → cleared → set again.
@@ -5076,6 +5226,142 @@ proc main() =
       echo ""
       echo "asset-selftest: FAIL (", bad, ")"
       quit(1)
+    of "routes-selftest":
+      # Action purpose: `classify` is pure, and the only assertions on it lived
+      # in `serve-selftest` and `tests/test_routes.sh` — both of which bind a
+      # port. So the routing table could only be checked by standing a server
+      # up, which is why `/v1/embeddings` reached the chat backend for as long
+      # as it did: prefix order is decidable with no socket at all, and nothing
+      # decidable that way was checking it.
+      var bad = 0
+      proc check(label: string, cond: bool, detail = "") =
+        if cond: echo "  ok   ", label
+        else:
+          echo "  FAIL ", label, (if detail.len > 0: "\n       " & detail else: "")
+          inc bad
+
+      echo "routes-selftest"
+
+      block embeddingsReachTheEmbedder:
+        # The OpenAI spelling shares its prefix with every completion route, so
+        # the order of the two tests is the whole of the behaviour.
+        check("/v1/embeddings is an embed route",
+              routes.classify("/v1/embeddings") == rcEmbed,
+              $routes.classify("/v1/embeddings"))
+        check("the unversioned spellings still are",
+              routes.classify("/embeddings") == rcEmbed and
+              routes.classify("/embed") == rcEmbed)
+
+      block completionsAreUnaffected:
+        for path in ["/v1/chat/completions", "/v1/completions", "/v1/models",
+                     "/completion", "/infill", "/chat", "/props", "/slots"]:
+          check(path & " is a completion route",
+                routes.classify(path) == rcCompletion, $routes.classify(path))
+
+      block healthOutranksTheV1Prefix:
+        # Tested before `/v1/`, or the completion handler parses a JSON body a
+        # GET does not carry and answers 400 to a liveness probe.
+        check("/health is a health route",
+              routes.classify("/health") == rcHealth)
+        check("/v1/health is one too",
+              routes.classify("/v1/health") == rcHealth)
+
+      block everythingElse:
+        check("/api/db/notes is an api route",
+              routes.classify("/api/db/notes") == rcApi)
+        check("/debug/stream is a debug route",
+              routes.classify("/debug/stream") == rcDebug)
+        # There is no catch-all relay: an unmatched path is served from
+        # `public/` or answered 404, and the two routes the frozen Web UI calls
+        # and this server does not implement fall here rather than upstream.
+        check("an unmatched path falls to static",
+              routes.classify("/index.html") == rcStatic)
+        check("/models/load is not relayed",
+              routes.classify("/models/load") == rcStatic)
+        check("/cors-proxy is not relayed",
+              routes.classify("/cors-proxy") == rcStatic)
+
+      block aPartialRequestLineIsNotAPath:
+        # The acceptor peeks rather than reads, so an incomplete line must
+        # answer empty and be waited on rather than routed on a guess.
+        check("a request line with no terminator yields nothing",
+              routes.pathFromHead("GET /v1/chat") == "")
+        check("a complete one yields the target",
+              routes.pathFromHead("GET /v1/chat HTTP/1.1\r\n") == "/v1/chat")
+
+      block chunkedTransferEncoding:
+        let (b1, ok1) = http.parseChunkedBody("5\r\nhello\r\n0\r\n\r\n")
+        check("single chunk decodes accurately", ok1 and b1 == "hello")
+
+        let (b2, ok2) = http.parseChunkedBody("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n")
+        check("multi-chunk stream decodes concatenated body", ok2 and b2 == "hello world")
+
+        let (b3, ok3) = http.parseChunkedBody("5;ext=val\r\nhello\r\n0\r\n\r\n")
+        check("chunk with extension is accepted", ok3 and b3 == "hello")
+
+        let (b4, ok4) = http.parseChunkedBody("5\r\nhello\r\n0\r\nExpires: never\r\n\r\n")
+        check("chunk with trailing header is accepted", ok4 and b4 == "hello")
+
+        let (_, ok5) = http.parseChunkedBody("zz\r\nhello\r\n0\r\n\r\n")
+        check("non-hex chunk size is refused", not ok5)
+
+        let (_, ok6) = http.parseChunkedBody("10\r\nhello\r\n0\r\n\r\n")
+        check("truncated chunk is refused", not ok6)
+
+        let (_, ok7) = http.parseChunkedBody("5\r\nhelloXX0\r\n\r\n")
+        check("missing CRLF delimiter is refused", not ok7)
+
+        let (_, ok8) = http.parseChunkedBody("5\r\nhello\r\n")
+        check("incomplete stream with no terminating chunk is refused", not ok8)
+
+        let (_, ok9) = http.parseChunkedBody("5\r\nhello\r\n0\r\n\r\n", maxBytes = 4)
+        check("stream exceeding maxBytes limit is refused", not ok9)
+
+        # Decoded payload byte accounting (raw is 14 bytes, payload is 5 bytes)
+        let (b10, ok10) = http.parseChunkedBody("5\r\nhello\r\n0\r\n\r\n", maxBytes = 5)
+        check("maxBytes enforces decoded payload size, not raw transport bytes", ok10 and b10 == "hello")
+
+        # Incremental parser resumption across multiple reads
+        var p: http.ChunkParser
+        var stream = "5\r\nhello\r\n"
+        p.feed(stream)
+        check("partial stream decodes first chunk and waits", p.body == "hello" and not p.done and not p.error)
+        stream.add "6\r\n world\r\n0\r\n\r\n"
+        p.feed(stream)
+        check("stream continuation appends only new chunk and finishes", p.body == "hello world" and p.done and not p.error)
+
+        # CRLF sanitization
+        let safeScope = rag.formatScope("f1\r\nX-Injected: 1", "p1\n", "w1")
+        check("formatScope strips carriage return and newline characters",
+              not safeScope.contains('\r') and not safeScope.contains('\n'))
+
+        # Early rejection of oversized declared chunk size before body data arrives
+        var pEarly: http.ChunkParser
+        pEarly.feed("1000000\r\n", maxBytes = 1000)
+        check("declared chunk size exceeding maxBytes fails immediately without body data",
+              pEarly.tooLarge and pEarly.error)
+
+        # Consumed byte removal and pos reset preserving unconsumed framing bytes
+        var pSlice: http.ChunkParser
+        var chunkBuf = "5\r\nhello\r\n5\r\nw"
+        pSlice.feed(chunkBuf)
+        check("first chunk decoded and pos set", pSlice.body == "hello" and pSlice.pos == 10)
+        chunkBuf = chunkBuf[pSlice.pos .. ^1]
+        pSlice.pos = 0
+        check("unconsumed framing preserved in buffer", chunkBuf == "5\r\nw")
+        chunkBuf.add "orld\r\n0\r\n\r\n"
+        pSlice.feed(chunkBuf)
+        if pSlice.pos > 0:
+          chunkBuf = chunkBuf[pSlice.pos .. ^1]
+          pSlice.pos = 0
+        check("resumed feed decodes second chunk and terminates",
+              pSlice.body == "helloworld" and pSlice.done and chunkBuf.len == 0)
+
+      if bad == 0:
+        echo "routes-selftest: PASS"
+        quit(0)
+      echo "routes-selftest: FAIL (", bad, ")"
+      quit(1)
     of "pipeline-selftest":
       # Proves the pipeline's seven behaviours against a scratch database. Web
       # search is exercised only for its formatting, not by making a request.
@@ -5165,6 +5451,56 @@ proc main() =
         check("no intent falls back to the freechat persona",
               body["messages"][0]["content"].getStr.contains("autonomous agent"))
         check("no intent is reported as inNone", r.intent == inNone)
+
+      # Action purpose: a turn carrying an attachment sends an OpenAI content
+      # *array* rather than a string, and `getStr` answers empty for one — so
+      # every enrichment here sat behind a length test no such turn could pass.
+      # The persona, the intent and the retrieval were all skipped for exactly
+      # the turns that carry a file, on both surfaces.
+      block attachmentTurnsAreStillPrepared:
+        let body = """{"messages":[{"role":"user","content":[""" &
+          """{"type":"text","text":"Visual Rewrite: tidy this"},""" &
+          """{"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}}""" &
+          """]}]}"""
+        let r = pipeline.prepare(body)
+        check("an intent prefix is detected through a content array",
+              r.intent == inVisual)
+        let parsed = parseJson(r.body)
+        check("an attachment turn still gets a system message",
+              parsed["messages"][0]{"role"}.getStr == "system", r.body)
+        check("...and it carries the intent's own persona",
+              parsed["messages"][0]["content"].getStr.contains(
+                "inline rewrite mode"))
+        let parts = parsed["messages"][^1]["content"]
+        check("the content is still an array", parts.kind == JArray, $parts.kind)
+        check("the prefix is stripped from the text part",
+              not parts[0]["text"].getStr.contains("Visual Rewrite:"),
+              parts[0]["text"].getStr)
+        # The one that matters: assigning the stripped string over the content
+        # would strip the attachment with the prefix.
+        check("and the image part survives the strip",
+              parts.len == 2 and parts[1]{"type"}.getStr == "image_url", $parts)
+
+      # Action purpose: `userText` joins every text part and `detectIntent`
+      # strips leading whitespace off that join, so an empty leading part leaves
+      # the prefix in the second one. Editing the first text part unconditionally
+      # stripped nothing and sent the marker on to the model — detected here and
+      # answered there, which is the outcome the strip exists to prevent.
+      block thePrefixIsStrippedFromThePartCarryingIt:
+        let body = """{"messages":[{"role":"user","content":[""" &
+          """{"type":"text","text":""},""" &
+          """{"type":"text","text":"Web Search: what is FreeBSD"}""" &
+          """]}]}"""
+        let r = pipeline.prepare(body)
+        check("the intent is detected out of a later text part",
+              r.intent == inWebSearch)
+        let parts = parseJson(r.body)["messages"][^1]["content"]
+        check("both text parts survive", parts.len == 2, $parts.len)
+        check("the empty leading part is left alone",
+              parts[0]["text"].getStr.len == 0, parts[0]["text"].getStr)
+        check("and the prefix is gone from the part that carried it",
+              not parts[1]["text"].getStr.contains("Web Search:"),
+              parts[1]["text"].getStr)
 
       # Action purpose: the chain the inspector reads, with the sockets taken
       # out — the pipeline's own measurements, through the header builder
@@ -7099,6 +7435,125 @@ proc main() =
         else:
           echo "  FAIL the vector-scan ceiling is too low: ", rag.MaxVectorScan
           inc failures
+
+      # Action purpose: unfiling on delete is the primary mechanism and it stays.
+      # This asserts the backstop underneath it. Every `forget*` call runs inside
+      # `api.indexing`, which swallows a failure on purpose — retrieval degrading
+      # is not worth a user's note — so a skipped unfile leaves a deleted row
+      # answering queries, with the deletion honoured everywhere except in what
+      # the model recalls. The chunks are left filed here deliberately, because
+      # that is the state the swallowed failure produces.
+      block deletedRowsAreNotRecalled:
+        proc live(label: string, cond: bool, detail = "") =
+          if cond: echo "  ok   ", label
+          else:
+            echo "  FAIL ", label,
+                 (if detail.len > 0: "\n       " & detail else: "")
+            inc failures
+
+        const noteId = "ragtest-deleted-note"
+        const body = "gorgonzola stilton roquefort"
+        db.exec("DELETE FROM notes WHERE id=?", [noteId])
+        db.exec("INSERT INTO notes (id, folderId, projectId, workspaceId, " &
+                "title, content, updatedAt, isFocusNote, is_deleted) " &
+                "VALUES (?, '', '', '', 'Deletable', ?, 0, 0, 0)",
+                [noteId, body])
+        discard rag.indexContent(rag.notePath(noteId), body)
+
+        live("an indexed note is retrievable",
+             rag.query("gorgonzola", topK = 5, withSnippets = false).len > 0)
+
+        db.exec("UPDATE notes SET is_deleted=1 WHERE id=?", [noteId])
+        let after = rag.query("gorgonzola", topK = 5, withSnippets = false)
+        live("a deleted note is not recalled, even with its chunks still filed",
+             after.len == 0, $after.len)
+
+        # Restore is the other half: the filter must read the row rather than
+        # remember a verdict, or a restored note stays invisible to retrieval
+        # until something re-indexes it.
+        db.exec("UPDATE notes SET is_deleted=0 WHERE id=?", [noteId])
+        live("...and restoring the row makes it retrievable again",
+             rag.query("gorgonzola", topK = 5, withSnippets = false).len > 0)
+
+        rag.forgetFile(rag.notePath(noteId))
+        db.exec("DELETE FROM notes WHERE id=?", [noteId])
+
+      block retrievalScopingHierarchy:
+        proc scopeCheck(label: string, cond: bool, detail = "") =
+          if cond: echo "  ok   ", label
+          else:
+            echo "  FAIL ", label,
+                 (if detail.len > 0: "\n       " & detail else: "")
+            inc failures
+
+        db.exec("DELETE FROM workspaces WHERE id LIKE 'ragscope-%'")
+        db.exec("DELETE FROM projects WHERE id LIKE 'ragscope-%'")
+        db.exec("DELETE FROM folders WHERE id LIKE 'ragscope-%'")
+        db.exec("DELETE FROM notes WHERE id LIKE 'ragscope-%'")
+
+        db.exec("INSERT INTO workspaces (id, name, is_deleted) VALUES ('ragscope-w1', 'W1', 0)")
+        db.exec("INSERT INTO workspaces (id, name, is_deleted) VALUES ('ragscope-w2', 'W2', 0)")
+        db.exec("INSERT INTO projects (id, workspaceId, name, is_deleted) VALUES ('ragscope-p1', 'ragscope-w1', 'P1', 0)")
+        db.exec("INSERT INTO folders (id, projectId, name, is_deleted) VALUES ('ragscope-f1', 'ragscope-p1', 'F1', 0)")
+
+        db.exec("INSERT INTO notes (id, folderId, projectId, workspaceId, title, content, updatedAt, isFocusNote, is_deleted) " &
+                "VALUES ('ragscope-n-folder', 'ragscope-f1', 'ragscope-p1', 'ragscope-w1', 'Folder Note', 'scopemagic sapphire folder token', 0, 0, 0)")
+        db.exec("INSERT INTO notes (id, folderId, projectId, workspaceId, title, content, updatedAt, isFocusNote, is_deleted) " &
+                "VALUES ('ragscope-n-proj', '', 'ragscope-p1', 'ragscope-w1', 'Project Note', 'scopemagic emerald project token', 0, 0, 0)")
+        db.exec("INSERT INTO notes (id, folderId, projectId, workspaceId, title, content, updatedAt, isFocusNote, is_deleted) " &
+                "VALUES ('ragscope-n-ws', '', '', 'ragscope-w1', 'Workspace Note', 'scopemagic ruby workspace token', 0, 0, 0)")
+        db.exec("INSERT INTO notes (id, folderId, projectId, workspaceId, title, content, updatedAt, isFocusNote, is_deleted) " &
+                "VALUES ('ragscope-n-w2', '', '', 'ragscope-w2', 'W2 Note', 'scopemagic diamond w2 token', 0, 0, 0)")
+        db.exec("INSERT INTO notes (id, folderId, projectId, workspaceId, title, content, updatedAt, isFocusNote, is_deleted) " &
+                "VALUES ('ragscope-n-global', '', '', '', 'Global Note', 'scopemagic obsidian global token', 0, 0, 0)")
+
+        discard rag.indexContent(rag.notePath("ragscope-n-folder"), "scopemagic sapphire folder token")
+        discard rag.indexContent(rag.notePath("ragscope-n-proj"), "scopemagic emerald project token")
+        discard rag.indexContent(rag.notePath("ragscope-n-ws"), "scopemagic ruby workspace token")
+        discard rag.indexContent(rag.notePath("ragscope-n-w2"), "scopemagic diamond w2 token")
+        discard rag.indexContent(rag.notePath("ragscope-n-global"), "scopemagic obsidian global token")
+
+        proc hitPaths(scope: rag.ScopeContext): seq[string] =
+          for h in rag.query("scopemagic", topK = 10, withSnippets = false, scope = scope):
+            result.add h.path
+
+        let globalHits = hitPaths(rag.ScopeContext())
+        scopeCheck("global scope retrieves global note", rag.notePath("ragscope-n-global") in globalHits)
+        scopeCheck("global scope strictly isolates from workspace notes",
+                   rag.notePath("ragscope-n-ws") notin globalHits and
+                   rag.notePath("ragscope-n-proj") notin globalHits and
+                   rag.notePath("ragscope-n-folder") notin globalHits and
+                   rag.notePath("ragscope-n-w2") notin globalHits)
+
+        let wsScope = rag.parseScope("workspace=ragscope-w1")
+        let wsHits = hitPaths(wsScope)
+        scopeCheck("workspace scope retrieves workspace note", rag.notePath("ragscope-n-ws") in wsHits)
+        scopeCheck("workspace scope retrieves project sub-note", rag.notePath("ragscope-n-proj") in wsHits)
+        scopeCheck("workspace scope retrieves folder sub-note", rag.notePath("ragscope-n-folder") in wsHits)
+        scopeCheck("workspace scope excludes other workspace note", rag.notePath("ragscope-n-w2") notin wsHits)
+        scopeCheck("workspace scope excludes global note", rag.notePath("ragscope-n-global") notin wsHits)
+
+        let projScope = rag.parseScope("project=ragscope-p1;workspace=ragscope-w1")
+        let projHits = hitPaths(projScope)
+        scopeCheck("project scope retrieves project note", rag.notePath("ragscope-n-proj") in projHits)
+        scopeCheck("project scope retrieves folder sub-note", rag.notePath("ragscope-n-folder") in projHits)
+        scopeCheck("project scope excludes workspace root note", rag.notePath("ragscope-n-ws") notin projHits)
+        scopeCheck("project scope excludes other workspace note", rag.notePath("ragscope-n-w2") notin projHits)
+        scopeCheck("project scope excludes global note", rag.notePath("ragscope-n-global") notin projHits)
+
+        let folderScope = rag.parseScope("folder=ragscope-f1;project=ragscope-p1;workspace=ragscope-w1")
+        let folderHits = hitPaths(folderScope)
+        scopeCheck("folder scope retrieves folder note", rag.notePath("ragscope-n-folder") in folderHits)
+        scopeCheck("folder scope excludes project root note", rag.notePath("ragscope-n-proj") notin folderHits)
+        scopeCheck("folder scope excludes workspace root note", rag.notePath("ragscope-n-ws") notin folderHits)
+        scopeCheck("folder scope excludes global note", rag.notePath("ragscope-n-global") notin folderHits)
+
+        for id in ["ragscope-n-folder", "ragscope-n-proj", "ragscope-n-ws", "ragscope-n-w2", "ragscope-n-global"]:
+          rag.forgetFile(rag.notePath(id))
+        db.exec("DELETE FROM workspaces WHERE id LIKE 'ragscope-%'")
+        db.exec("DELETE FROM projects WHERE id LIKE 'ragscope-%'")
+        db.exec("DELETE FROM folders WHERE id LIKE 'ragscope-%'")
+        db.exec("DELETE FROM notes WHERE id LIKE 'ragscope-%'")
 
       if failures == 0:
         echo ""

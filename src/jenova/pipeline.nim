@@ -102,6 +102,24 @@ proc lastUserIndex(messages: JsonNode): int =
     if m.kind == JObject and m.hasKey("role") and m["role"].getStr == "user":
       return i
 
+## Function purpose: a turn's words, whichever shape its content took. A turn
+## carrying an attachment sends an OpenAI content *array* rather than a string,
+## and `getStr` answers empty for one — which silently skipped intent detection,
+## retrieval and the persona for exactly the turns that carry a file.
+proc userText*(content: JsonNode): string =
+  if content.isNil: return ""
+  case content.kind
+  of JString:
+    content.getStr
+  of JArray:
+    var parts: seq[string]
+    for p in content:
+      if p.kind == JObject and p{"type"}.getStr("") == "text":
+        parts.add p{"text"}.getStr("")
+    parts.join("\n")
+  else:
+    ""
+
 ## Function purpose: the prefix is stripped because it is addressed to this
 ## program and not to the model, which would otherwise answer about the marker.
 proc detectIntent*(text: string): tuple[intent: Intent, stripped: string] =
@@ -110,6 +128,22 @@ proc detectIntent*(text: string): tuple[intent: Intent, stripped: string] =
     if trimmed.startsWith(prefix):
       return (intent, trimmed[prefix.len .. ^1].strip(trailing = false))
   (inNone, text)
+
+## Function purpose: where a prefix strip has to be written back on an array
+## turn. Assigning a string over the array would drop every attachment with it.
+##
+## Action purpose: **the part that carries the prefix, not the first text part.**
+## `userText` joins every text part and `detectIntent` strips leading whitespace
+## off that join, so an empty or blank leading part leaves the prefix sitting in
+## the *second* one. Editing the first then strips nothing and the marker travels
+## to the model in the outbound body — detected by this program and answered by
+## the model, which is the one outcome the strip exists to prevent.
+proc prefixedTextPart(content: JsonNode): JsonNode =
+  if content.isNil or content.kind != JArray: return nil
+  for p in content:
+    if p.kind != JObject or p{"type"}.getStr("") != "text": continue
+    if detectIntent(p{"text"}.getStr("")).intent != inNone: return p
+  nil
 
 ## Function purpose: a visual rewrite needs almost no context, a web search
 ## needs none because its context comes from the web, and a large file-chat
@@ -333,7 +367,7 @@ proc trimHistory*(messages: JsonNode, budgetBytes: int):
 ## rewritten body and its cache key. A body that is not a chat request passes
 ## through untouched — the raw-prompt endpoints have no messages to inject into,
 ## and that check is here rather than at each caller.
-proc prepare*(rawBody: string, projectRoot = ""): Prepared =
+proc prepare*(rawBody: string, projectRoot = "", scope: ScopeContext = ScopeContext()): Prepared =
   result.body = rawBody
 
   var req: JsonNode
@@ -345,12 +379,22 @@ proc prepare*(rawBody: string, projectRoot = ""): Prepared =
   let idx = lastUserIndex(messages)
   if idx < 0: return
 
-  var lastUser = messages[idx]{"content"}.getStr
+  let content = messages[idx]{"content"}
+  var lastUser = userText(content)
   let (intent, stripped) = detectIntent(lastUser)
   result.intent = intent
   if stripped != lastUser:
+    # Action purpose: the array form is edited in place, one part deep —
+    # replacing the whole content with a string would send the attachments
+    # nowhere. The part edited is the one that actually carries the prefix,
+    # which is not always the first text part.
+    if content.kind == JArray:
+      let part = prefixedTextPart(content)
+      if part != nil:
+        part["text"] = %detectIntent(part{"text"}.getStr("")).stripped
+    else:
+      messages[idx]["content"] = %stripped
     lastUser = stripped
-    messages[idx]["content"] = %lastUser
 
   result.hadTools = req.hasKey("tools") and req["tools"].kind == JArray and
                     req["tools"].len > 0
@@ -373,7 +417,7 @@ proc prepare*(rawBody: string, projectRoot = ""): Prepared =
     let limit = ragLimitFor(intent, large)
     if limit > 0:
       let hits = rag.query(query, topK = limit, withSnippets = true,
-                           pathFilter = projectRoot)
+                           pathFilter = projectRoot, scope = scope)
       result.ragHits = hits.len
       # Action purpose: the hits are kept, not only counted. `rag.query` has
       # always returned the path and the three scores and every caller

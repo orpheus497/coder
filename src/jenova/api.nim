@@ -319,9 +319,7 @@ template indexing(body: untyped) =
   except CatchableError:
     discard
 
-## Function purpose: insert-or-replace from a JSON body, with a missing field
-## becoming empty rather than an error — the client posts partial objects for
-## several entities and means them.
+## Function purpose: writes an entity row, merging omitted columns from any prior row.
 ##
 ## `mirror` is false only for bulk import, the one path that writes rows without
 ## touching the filesystem.
@@ -329,8 +327,18 @@ proc upsert(e: Entity, node: JsonNode, mirror = true): ApiResult =
   if node.kind != JObject or not node.hasKey("id"):
     return err(400, "body must be an object with an id")
   let id = node.f "id"
-  let prior = if mirror: rowFields(e, id) else: initTable[string, string]()
+  let prior = rowFields(e, id)
   let existed = prior.len > 0
+
+  # Action purpose: omitted columns are preserved from the existing row, so a
+  # partial update on either surface does not blank stored data.
+  var writeNode = node
+  if existed:
+    writeNode = newJObject()
+    for key, val in node: writeNode[key] = val
+    for col in e.cols:
+      if not writeNode.hasKey(col.name) and prior.hasKey(col.name):
+        writeNode[col.name] = %prior[col.name]
 
   # Action purpose: the deleted flag is not one of the declared columns, so the
   # writer always sets it to zero. Captured here before the row is overwritten,
@@ -342,9 +350,9 @@ proc upsert(e: Entity, node: JsonNode, mirror = true): ApiResult =
     if flagRows.len > 0 and flagRows[0].len > 0 and flagRows[0][0].len > 0:
       priorDeleted = flagRows[0][0]
 
-  writeRow(e, node)
+  writeRow(e, writeNode)
 
-  if mirror and not mirrorUpsert(e, node, prior, existed):
+  if mirror and not mirrorUpsert(e, writeNode, prior, existed):
     # Restore the previous state rather than leave a row with no file.
     if existed:
       var restoreNode = newJObject()
@@ -368,14 +376,14 @@ proc upsert(e: Entity, node: JsonNode, mirror = true): ApiResult =
   if mirror:
     case e.name
     of "notes":
-      let title = node.f "title"
-      let content = node.f "content"
+      let title = writeNode.f "title"
+      let content = writeNode.f "content"
       if not existed or prior.field("title") != title or
          prior.field("content") != content:
         indexing: discard rag.indexNote(id, title, content)
     of "fileAssets":
-      let name = node.f "name"
-      let content = node.f "content"
+      let name = writeNode.f "name"
+      let content = writeNode.f "content"
       if not existed or prior.field("name") != name or
          prior.field("content") != content:
         indexing: discard rag.indexFileAsset(id, name, content)
@@ -967,33 +975,11 @@ proc forkConversation*(sourceId, atMessageId, newName: string):
   if r.status != 200: return (false, "", r.body)
   (true, newId, "")
 
-## Function purpose: entity writes for in-process callers, through the same
-## upsert and delete the HTTP routes use, so cascades and the filesystem mirror
-## apply identically whichever surface the user is on.
-##
-## Action purpose: the node is merged onto the stored row before it is written,
-## and that is the one deliberate difference from the HTTP path. The generic
-## writer is insert-or-replace over every column, so a caller that omits one
-## blanks it — correct for a client that posts partial objects and means them,
-## wrong for a window that builds its node from whatever fields the open screen
-## happens to hold. Left to each call site the trap is inherited by every new
-## one; merged at the boundary they all pass through, it is closed once.
-##
-## A create is unaffected: a row that does not exist yet has no stored fields to
-## merge, so the node is written exactly as given.
+## Function purpose: entity writes for in-process callers, through the shared upsert.
 proc putEntity*(entity: string, node: JsonNode): bool =
   if entity notin Entities: return false
   if node.kind != JObject or not node.hasKey("id"): return false
-  let e = Entities[entity]
-  let prior = rowFields(e, node.f "id")
-  if prior.len == 0:
-    return upsert(e, node).status == 200
-  var merged = newJObject()
-  for key, val in node: merged[key] = val
-  for col in e.cols:
-    if not merged.hasKey(col.name) and prior.hasKey(col.name):
-      merged[col.name] = %prior[col.name]
-  upsert(e, merged).status == 200
+  upsert(Entities[entity], node).status == 200
 
 ## Function purpose: the in-process delete, through the same soft delete and
 ## cascade the HTTP route uses.
@@ -1330,8 +1316,16 @@ proc handleDb*(req: Request): ApiResult =
     # writes through. Only on an assistant row, which indexes the reply and the
     # turn it answers together — the same rule the window applies, so the two
     # surfaces cannot build different indexes.
-    if r.status == 200 and head == "messages" and node.f("role") == "assistant":
-      indexing: discard rag.indexExchange(node.f "id")
+    #
+    # Action purpose: the role comes from the stored row when the post omits it.
+    # `upsert` merges omitted columns, so an edit to a reply's text carries an id
+    # and a content and the merged row is the only place its role is.
+    if r.status == 200 and head == "messages":
+      let posted = node.f "role"
+      let role = (if posted.len > 0: posted
+                  else: rowFields(e, node.f "id").field("role"))
+      if role == "assistant":
+        indexing: discard rag.indexExchange(node.f "id")
     return r
 
   err(405, "method not allowed")

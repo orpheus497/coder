@@ -1,0 +1,431 @@
+# SESSION HANDOFF
+
+Newest entry at the top.
+
+## 2026-09-10T00:18Z — M-3 display math rendering: markdown delimiter parsing, HarfBuzz font metrics bridge, and Cairo screen drawing
+
+### What happened
+
+Implemented the full display math rendering pipeline (M-3) across the markdown parser, font metrics engine, and desktop GUI:
+1. **Markdown Parsing (`src/jenova/markdown.nim`):**
+   - Added `bkMath` to `BlockKind` enum (`bkText, bkCode, bkTable, bkMath`).
+   - Implemented single-line and multi-line delimiter parsing for both dollar fences (`$$...$$`) and bracket fences (`\[...\]`).
+   - Preserved half-open fences as `bkText` during token streaming so downstream generation is never swallowed or corrupted before closing delimiters arrive.
+   - Gated with 6 unit assertions in `markdown-selftest` in `src/jenova_core.nim`.
+2. **Font Metrics Bridge (`src/jenova/mathfont.nim`):**
+   - Added `hb_font_get_glyph_h_advance` FFI binding for HarfBuzz.
+   - Added installed `("DejaVu Math TeX Gyre", "DejaVuMathTeXGyre.ttf")` to `FontCandidates`.
+   - Implemented `buildMathLayoutFont` and `buildDefaultMathFont` providing real `measure` (run advance and bounding boxes) and `variants` (stretchy delimiters and HarfBuzz OpenType MATH table glyph variants) closures to `mathtex.MathFont`.
+   - Gated with live font assembly and layout assertions in `math-selftest` in `src/jenova_core.nim`.
+3. **GUI & Cairo Screen Drawing (`src/jenova/gui.nim`, `src/jenova/theme.nim`):**
+   - Bound Cairo text and state management FFI (`cairo_show_text`, `cairo_save`, `cairo_restore`).
+   - Implemented cached math layout font retrieval, preventing font file re-discovery on repeated renders.
+   - Implemented recursive `drawMathBox` rendering `bxRule` (axis fraction rules, radical overbars) via filled Cairo rectangles and `bxGlyph` via font-face glyph rendering with vertical scaling for variants.
+   - Implemented `drawMathBoxRoot` with theme-adaptive foreground color resolution (`parseHexColor`), natural padding, and horizontal centering.
+   - Wired `bkMath` rendering into `mdBlock`, wrapping the Cairo `DrawingArea` in `ContentScroll` for horizontal scrolling and providing a fallback container displaying literal source LaTeX if parsing or layout fails.
+   - Added `.md-math` CSS rule in `theme.nim`.
+4. **Validation & Regression:**
+   - Both `bin/jenova-core` and `bin/jenova` compiled cleanly with zero hints or warnings.
+   - `tests/gui_check.sh` passed.
+   - `bin/jenova --check` initialized GTK and verified the complete window tree without errors.
+   - All 21 socket-free self-tests (`db`, `sha256`, `markdown`, `error`, `tree`, `attach`, `workspace`, `nvim-env`, `models`, `fs`, `hardware`, `composer`, `convmd`, `asset`, `lifecycle`, `relay`, `inspect`, `math`, `pipeline`, `rag`, `routes`) passed cleanly.
+
+### Files touched
+
+- `src/jenova/markdown.nim`
+- `src/jenova/mathfont.nim`
+- `src/jenova/theme.nim`
+- `src/jenova/gui.nim`
+- `src/jenova_core.nim`
+- `.devdocs/DECISIONS_LOG.md`
+- `.devdocs/TODOS.md`
+- `.devdocs/PLANS.md`
+- `.devdocs/PROGRESS.md`
+- `.devdocs/BRIEFING.md`
+- `.devdocs/SESSION_HANDOFF.md`
+- `.devdocs/SUMMARIES.md`
+
+### Decisions
+
+- Display math fences (`$$...$$` and `\[...\]`) parse into standalone `bkMath` blocks, while unclosed streaming fences remain `bkText`.
+- Font metrics and stretchy delimiter variants are supplied to `mathtex.MathFont` via HarfBuzz and Pango/Cairo metrics without hardcoded test mocks.
+- Display math layout failures fall back gracefully to a styled text container showing literal LaTeX source rather than crashing or blanking.
+
+### Next steps
+
+1. Phase 2.2: reduce the three render memos (`BlockMemo`, `ParseMemo`, `thumbCache`) to viewport scale rather than conversation scale.
+2. Concurrency design for retrieval layer: address the two deferred races from report 03 (`forgetMessage` against restore-and-update indexing, and descendant discovery against fork creation).
+3. Phase 4.3: implement the command palette in the desktop GUI.
+4. Reachable hardware & platform integrations: FreeBSD `sysctl` probe, `fork`/`setsid`/`execv` path, D-Bus tray against real watcher.
+5. Capture `png/gui-*.png` screenshots to unblock README reordering.
+
+---
+
+## 2026-09-09T23:22Z — chunk parser hardening: early size validation, overflow protection, and buffer pruning
+
+### What happened
+
+Addressed both review findings in `src/jenova/http.nim`:
+1. **Early chunk size validation & overflow protection:**
+   - In `feed`, checked `chunkSize > maxBytes - parser.body.len` immediately after hex decoding. If the declared chunk size exceeds allowable remaining body bytes, `parser.tooLarge = true` and `parser.error = true` are set immediately, rejecting oversized declarations before waiting for socket data or growing `raw`.
+   - Replaced `dataEnd + 2 > raw.len` with subtraction (`raw.len - dataEnd < 2`) to eliminate 64-bit integer overflow.
+   - Updated `parser.pos` on zero-chunk completion to advance past `\r\n` or trailer headers.
+2. **Consumed bytes pruning in socket read loop:**
+   - Restructured the chunked socket read loop in `parseRequest` to slice `raw` by removing consumed bytes (`raw = raw[parser.pos .. ^1]`) and resetting `parser.pos = 0` after each `feed` call. Preserves unconsumed framing bytes for subsequent reads without unbounded memory accumulation.
+3. **Unit test validation:**
+   - Added 4 unit assertions to `routes-selftest` in `src/jenova_core.nim` validating early rejection of oversized declared chunk sizes without body data, unconsumed framing preservation, and incremental decoding with buffer slicing.
+   - All 21 socket-free self-test suites pass cleanly (`routes-selftest` 36/36, `rag-selftest` 98/98, `workspace-selftest` 77/77, `pipeline-selftest` 134/134, `relay-selftest` 12/12, `inspect-selftest` 45/45).
+
+### Files touched
+
+- `src/jenova/http.nim`
+- `src/jenova_core.nim`
+- `.devdocs/PROGRESS.md`
+- `.devdocs/BRIEFING.md`
+- `.devdocs/SESSION_HANDOFF.md`
+- `.devdocs/SUMMARIES.md`
+
+### Decisions
+
+- Validated declared chunk size before evaluating buffer sufficiency so malicious or oversized chunk headers are rejected immediately at $O(1)$ cost.
+- Reset `parser.pos = 0` only after slicing `raw = raw[parser.pos .. ^1]`, keeping the parser state aligned with the active buffer slice.
+
+### Next steps
+
+1. Scope and implement M-3 maths rendering: introduce `bkMath` to `markdown.BlockKind`, parse display math fences (`$$...$$`), and connect `mathtex`/`mathfont` to the GTK/Cairo draw loop in `gui.nim`.
+2. Phase 2.2: reduce `BlockMemo`, `ParseMemo`, and `thumbCache` from full conversation scale to viewport scale.
+3. Design retrieval-layer concurrency locking or deletion generational counters to resolve the two deferred races from report 03.
+
+---
+
+## 2026-09-09T23:14Z — review findings resolved: AGENTS.md governance, RAG scope preloading & vector scan order, GUI header sanitization, and streaming ChunkParser
+
+### What happened
+
+Addressed and resolved all 7 review findings across the codebase and directives:
+1. **`AGENTS.md` canonical timestamps & direct approval:**
+   - Standardized `AGENTS.md` to canonical UTC ISO-8601 (`YYYY-MM-DDTHH:MMZ`) with explicit `Z` sourced from harness tooling/clock, eliminating local offset allowance (`+10:00`) and prescriptive shell commands.
+   - Replaced cross-reference label in line 73 with direct approval requirement.
+2. **`src/jenova/rag.nim` query performance & scan order:**
+   - Preloaded container scopes once per query (`noteContainers()`, `fileContainers()`, `conversationContainers()`), caching parent links alongside `folderParents()` and `projectParents()`. This eliminates per-candidate SQLite queries during vector and BM25 passes.
+   - Reordered the vector scan loop so `dotBlob(qv, blob)` cosine similarity and `s <= SemanticFloor` thresholding evaluate *before* `checkScope(cols[0])`, avoiding container resolution for low-similarity embeddings.
+   - Added CRLF sanitization to `formatScope` via `sanitizeScopePart`.
+3. **`src/jenova/gui.nim` header sanitization:**
+   - Sanitized `job.scopeHeader` at the send site by stripping `\r` and `\n` characters before appending `X-Jenova-Scope` into outbound request strings.
+4. **`src/jenova/http.nim` stateful chunk streaming & decoded byte limits:**
+   - Implemented stateful `ChunkParser` struct with incremental `feed` resuming from the previous read position without re-allocating or re-parsing earlier chunks.
+   - Bounded chunk header reads to `MaxHeadBytes` to protect against header floods.
+   - Measured `MaxBodyBytes` strictly against accumulated decoded payload bytes rather than transport framing delimiters, raising `BodyTooLargeError` if exceeded.
+5. **Validation & regression coverage:**
+   - Added 4 new assertions to `routes-selftest` in `src/jenova_core.nim` covering incremental chunk reading across multiple socket packets, payload vs transport limit verification, and CRLF scope stripping.
+   - Built `bin/jenova-core` natively with Nim compiler; executed all socket-free self-test suites (`routes-selftest` 32/32, `rag-selftest` 98/98, `workspace-selftest` 77/77, `pipeline-selftest` 134/134, `relay-selftest` 12/12, `inspect-selftest` 45/45, `db-selftest` 2000 ops) with 100% pass rate.
+
+### Files touched
+
+- `AGENTS.md`
+- `src/jenova/rag.nim`
+- `src/jenova/gui.nim`
+- `src/jenova/http.nim`
+- `src/jenova_core.nim`
+- `.devdocs/PROGRESS.md`
+- `.devdocs/BRIEFING.md`
+- `.devdocs/SESSION_HANDOFF.md`
+- `.devdocs/SUMMARIES.md`
+
+### Decisions
+
+- Preloaded entity container lookups in memory per RAG query, turning container hierarchy checks into $O(1)$ hash table operations while preserving isolation semantics.
+- Enforced `MaxBodyBytes` against cumulative decoded body bytes rather than raw chunk-encoded wire bytes to avoid rejecting valid payloads with heavy hex chunk framing.
+
+### Next steps
+
+1. Scope and implement M-3 maths rendering: introduce `bkMath` to `markdown.BlockKind`, parse display math fences (`$$...$$`), and connect `mathtex`/`mathfont` to the GTK/Cairo draw loop in `gui.nim`.
+2. Phase 2.2: reduce `BlockMemo`, `ParseMemo`, and `thumbCache` from full conversation scale to viewport scale.
+3. Design retrieval-layer concurrency locking or deletion generational counters to resolve the two deferred races from report 03.
+
+---
+
+## 2026-09-09T23:00Z — executed D6 partial-node merge, D5 retrieval scoping hierarchy, and D9 chunked request body parsing
+
+### What happened
+
+Implemented and verified the three approved tasks from the implementation plan:
+1. **D6 (Partial-node merge in `api.upsert`):** Moved the column merge logic from `putEntity` directly into `api.upsert`. HTTP `POST /api/db/*` callers omitting fields (such as note `content`) now preserve existing stored data, guaranteeing identical safe update semantics between in-process GUI writes and HTTP API clients. Verified with 2 new assertions in `workspace-selftest`.
+2. **D5 (Hierarchical retrieval scoping & `X-Jenova-Scope` wire contract):**
+   - Implemented `ScopeContext`, `parseScope`, `formatScope`, and `inScope` in `src/jenova/rag.nim`.
+   - Built down-tree container filtering matching the ruled ladder: non-workspace searches isolate completely from workspace folders; workspace searches cover workspace, project, and folder sub-trees; project searches cover project and child folders; folder searches isolate strictly to that folder.
+   - Wired `X-Jenova-Scope` header through `src/jenova/http.nim`, `src/jenova/server.nim`, `src/jenova/pipeline.nim`, and `src/jenova/gui.nim`.
+   - Added 16 assertions in `rag-selftest` in `src/jenova_core.nim`, testing every level of the ladder and isolating boundaries.
+3. **D9 (Pure HTTP chunked body parsing):**
+   - Implemented pure, socket-free `parseChunkedBody` in `src/jenova/http.nim`, handling chunk sizes, extensions, data delimiters, trailers, and `MaxBodyBytes` enforcement.
+   - Updated `parseRequest` to stream chunked bodies incrementally from the socket when `Transfer-Encoding: chunked` is present.
+   - Added 9 unit assertions in `routes-selftest` in `src/jenova_core.nim`.
+
+All 21 socket-free self-tests pass natively without listener binding.
+
+### Files touched
+
+- `src/jenova/api.nim`
+- `src/jenova/http.nim`
+- `src/jenova/rag.nim`
+- `src/jenova/pipeline.nim`
+- `src/jenova/server.nim`
+- `src/jenova/gui.nim`
+- `src/jenova_core.nim`
+- `.devdocs/PROGRESS.md`
+- `.devdocs/TODOS.md`
+- `.devdocs/PLANS.md`
+- `.devdocs/BLUEPRINT.md`
+- `.devdocs/BRIEFING.md`
+- `.devdocs/SESSION_HANDOFF.md`
+- `.devdocs/SUMMARIES.md`
+
+### Decisions
+
+- Evaluated container resolution in SQLite directly using `folderParents()` and `projectParents()`, caching lookup results during each RAG query to minimize database access.
+- Confirmed unfiled / non-workspace chats and notes are completely isolated from workspace folders during retrieval, while synthetic test paths without table rows are retrievable in global non-workspace mode.
+
+### Next steps
+
+1. Scope and implement M-3 maths rendering: introduce `bkMath` to `markdown.BlockKind`, parse display math fences (`$$...$$`), and connect `mathtex`/`mathfont` to the GTK/Cairo draw loop in `gui.nim`.
+2. Phase 2.2: reduce `BlockMemo`, `ParseMemo`, and `thumbCache` from full conversation scale to viewport scale.
+3. Design retrieval-layer concurrency locking or deletion generational counters to resolve the two deferred races from report 03.
+
+---
+
+## 2026-09-09T22:35Z — architectural rulings confirmed: D5 retrieval scoping hierarchy, D6 partial-node merge, V-17 citation policy
+
+### What happened
+
+Received user rulings on the three primary architectural ambiguities: D5, D6, and V-17.
+Documented the exact specifications across `.devdocs/` trackers without making source code changes.
+
+### Rulings & Design Specifications
+
+1. **D5 — Retrieval Scoping Hierarchy:**
+   The user specified the authoritative hierarchy for RAG retrieval down the container tree:
+   - **No workspace (root/global chat):** RAG searches only non-workspace chats and saved files/notes
+     outside of any workspace. It does not retrieve anything from any workspace folder.
+   - **Workspace Folder:** RAG scopes to this workspace and all its subfolders and projects.
+   - **Workspace Project Folder:** RAG scopes to only this project and its subfolders.
+   - **Project Sub-folder:** RAG scopes to only this folder and its contents.
+   The client will pass the container context via the `X-Jenova-Scope` HTTP header, and
+   `pipeline.prepare` will enforce this scoping ladder over the FTS/vector index.
+2. **D6 — Partial-node merge in `upsert`:**
+   Ruled as recommended: Merge incoming partial JSON fields onto existing stored database rows
+   inside `api.upsert`. Updates via `POST /api/db/*` will preserve existing values for omitted
+   columns, eliminating the risk of accidental content blanking.
+3. **V-17 — Documentation citation policy:**
+   Ruled as recommended: Zero citations, tracking labels, or document cross-references in code
+   comments. Reference material and citations live strictly in `.devdocs/`.
+
+### Files touched
+
+`.devdocs/DECISIONS_LOG.md`, `.devdocs/BLUEPRINT.md`, `.devdocs/TODOS.md`,
+`.devdocs/BRIEFING.md`, `.devdocs/PROGRESS.md`, `.devdocs/SESSION_HANDOFF.md`,
+`.devdocs/SUMMARIES.md`.
+
+### Decisions
+
+Recorded in `DECISIONS_LOG.md`: D5 retrieval scoping hierarchy, D6 `upsert` merge, and V-17 code comment standards.
+
+### Next steps
+
+Await user instruction to begin implementation of D6 (partial-node merge in `api.upsert`),
+followed by D5 (container scoping in `pipeline.prepare` and `server.nim`), and D9 (pure dechunker).
+
+## 2026-09-09T22:23Z — devdocs audit against active code and correction of false claims
+
+### What happened
+
+Conducted a deep codebase analysis cross-referencing actual Nim code logic (not code comments)
+against `.devdocs/` trackers and audit reports. Discovered and corrected several tracker
+discrepancies, stale claims, and inaccurate assumptions about test execution and environment.
+No source code outside `.devdocs/` was modified.
+
+### Discrepancies and false claims resolved
+
+1. **`relay-selftest` does NOT bind a listener.** `src/jenova_core.nim` (lines 6125–6209)
+   demonstrates that `relay-selftest` tests `upstream.spliceHeaders` on fixed string literals in memory.
+   It opens no sockets, binds no ports, and requires no server. Trackers claiming `serve` and `relay`
+   both bind listeners were inaccurate; only `serve-selftest` binds a listener (port 18642).
+   Twenty-one of the twenty-two self-tests are completely socket-free.
+2. **`AGENTS.md` tracking status.** `BRIEFING.md` claimed `AGENTS.md` was untracked until committed.
+   Git log verifies it was committed in `5606d418` on branch `nimby`, and the working tree is clean.
+3. **Environment context.** Clarified that this workspace is a Linux container hosted on a FreeBSD
+   system. Kernel-level inspections, `sysctl` probes, and hardware detection paths reflect this
+   containerized layering.
+4. **Tracker synchronization (`PLANS.md`).** `PLANS.md` previously retained full implementation
+   plans for D1, D2/D3, D4, D7, and D8 after their completion. Because their completion records
+   live in `PROGRESS.md`, `PLANS.md` was cleared to align with `TODOS.md` Active.
+
+### Code verification highlights (logic verified, comments ignored)
+
+- **Attachment turns in `pipeline.nim`:** `userText` inspects `JString` or `JArray` content,
+  and `prefixedTextPart` isolates the specific text part carrying intent prefixes.
+- **Workspace context in `workspace.nim`:** Reads metadata columns first, scopes them, and then
+  reads individual row bodies capped at `MaxContextBytes = 64KB`.
+- **Route classification in `routes.nim`:** Embed endpoints (`/embed`, `/v1/embeddings`) are tested
+  prior to `/v1/` completion routes.
+- **Database query handling in `db.nim`:** `queryBlob` raises `DbError` on non-DONE/ROW step codes.
+- **Math font discovery in `mathfont.nim`:** `chooseFont` traverses font roots once.
+- **Display math M-3 in `markdown.nim` and `gui.nim`:** Confirmed that `BlockKind` lacks `bkMath`
+  and `gui.nim` does not import `mathtex` or `mathfont`, nor draw math blocks.
+- **Chunked request parsing in `http.nim`:** Confirmed `http.parseRequest` reads `Content-Length`
+  only, dropping chunked request bodies (D9).
+
+### Files touched
+
+`.devdocs/BRIEFING.md`, `.devdocs/TESTS.md`, `.devdocs/TODOS.md`, `.devdocs/PLANS.md`,
+`.devdocs/DECISIONS_LOG.md`, `.devdocs/PROGRESS.md`, `.devdocs/SESSION_HANDOFF.md`,
+`.devdocs/SUMMARIES.md`.
+
+### Decisions
+
+Recorded in `DECISIONS_LOG.md`: `relay-selftest` socket independence recognized; Linux container
+on FreeBSD environment clarified; `AGENTS.md` tracking verified; `PLANS.md` cleaned of executed items.
+
+### Verification
+
+All devdocs edits cross-referenced directly with Nim AST and logic in `src/jenova_core.nim`,
+`src/jenova/routes.nim`, `src/jenova/upstream.nim`, `src/jenova/pipeline.nim`,
+`src/jenova/workspace.nim`, `src/jenova/db.nim`, and `src/jenova/markdown.nim`.
+
+### Next steps
+
+Awaiting user rulings on D5 (retrieval scoping), D6 (partial-node merge in `upsert`), and
+V-17 (documentation citations). Upon approval: execute D6/D5/D9 and progress M-3 display math.
+
+## 2026-09-09 — source audit against the eight reports, and five repairs
+
+### What happened
+
+The session opened as a cross-reference of `AGENTS.md` and `.devdocs/` against the
+codebase. The first pass was done by searching for symbols rather than reading the code,
+and reported the audit reports' own conclusions back with their line citations checked —
+which is not the same as checking the claims. It also repeated report 05's "blocked on a
+FreeBSD host" framing while running on the FreeBSD host. Both were corrected: the second
+pass read the request path itself, module by module.
+
+### Defects found by reading `src/`, none of them in any report
+
+1. **Attachment turns bypassed the entire pipeline.** `pipeline.contentFor` emits an
+   OpenAI content array for any turn with an attachment; `prepare` read that content with
+   `getStr`, which answers empty for an array, and every enrichment sat behind
+   `if lastUser.len > 0`. So a turn with an image, file or PDF reached the model with no
+   persona, no retrieval, no web search, no editor document, and its intent prefix
+   neither detected nor stripped. Both surfaces.
+2. **`workspace.contextFor` read every note and file asset body on every send, on the
+   GTK thread.** The same defect a review fixed in `backfillWorkspace`, never applied to
+   the hot path.
+3. **That output goes into the system message, which `trimHistory` never drops.** Once
+   the dump alone exceeded the budget, every turn discarded the whole conversation and
+   was still over budget, with `X-Jenova-Trimmed` blaming the history.
+4. **`/v1/embeddings` routed to the chat backend** — `classify` tests `/v1/` first.
+5. **Retrieval is never scoped** — `prepare` takes a `projectRoot` and no caller passes
+   one. Held for a ruling.
+6. **The partial-node merge protects the window only** — the HTTP route blanks omitted
+   columns. Held for a ruling.
+7. **`db.queryBlob` truncated silently** on a step error where `query` raises.
+8. **`mathfont.chooseFont` walked the font roots thirty times.**
+9. **No chunked request bodies.** Backlogged.
+
+### Report claims found false
+
+V-15 is fixed but listed open; Phase 5.1 is substantially done but listed open; the
+self-test count is 21, not the 19 and 20 two reports state; the maths engine is not
+imported by `gui.nim` at all and `markdown.BlockKind` has no `bkMath`, so M-3 is larger
+than "the Cairo draw remains"; report 02 attributes `gui.nim`'s old line count to
+`canvas.nim`; report 04's comment census has risen to 32.4% against a 9% target; report
+06's widget census is 46, not 39; roughly four in five spot-checked line citations no
+longer land on what they name; and the FreeBSD compile guards both reports describe have
+been removed from the tree.
+
+### Files touched
+
+`src/jenova/pipeline.nim`, `src/jenova/workspace.nim`, `src/jenova/routes.nim`,
+`src/jenova/db.nim`, `src/jenova/mathfont.nim`, `src/jenova_core.nim`.
+Created `.devdocs/TODOS.md`, `PLANS.md`, `DECISIONS_LOG.md`, `PROGRESS.md`,
+`BRIEFING.md`, `SESSION_HANDOFF.md`, `SUMMARIES.md`.
+
+### Decisions
+
+Recorded in `DECISIONS_LOG.md`: the FreeBSD blocked-framing retired; the trackers
+recreated without cross-reference labels; five defects executed and two held; the
+workspace context bounded at its source rather than by teaching the trimmer to shorten a
+system message.
+
+### Verification
+
+`nimble core` and `nimble gui` both build. Nineteen self-tests pass. Twelve new
+assertions were added — six in `workspace-selftest`, six in `pipeline-selftest` — and the
+`pipeline` gate was **proven to fail with the fix reverted**: four of its six assertions
+go red. The other two guard the write-back path rather than the read path and would fail
+on the opposite mistake, which is stated rather than claimed as coverage.
+
+`serve-selftest`, `relay-selftest` and the shell suites were **not run** — they bind
+listeners and the session was instructed not to run the server or the program. The
+`/v1/embeddings` fix therefore has no assertion behind it yet.
+
+### Continued — AGENTS.md kept, coverage debt closed, reports corrected
+
+`AGENTS.md` was restored to the repository root byte-identical to the version deleted in
+`c5111ce3`, on instruction. It is untracked until committed.
+
+**The routing fix had shipped without an assertion**, because `classify`'s only coverage
+lived in two suites that bind a port. That is why `/v1/embeddings` reached the chat
+backend for as long as it did: prefix order is decidable with no socket at all, and
+nothing decidable that way was checking it. New `routes-selftest` — nineteen assertions
+over `classify` and `pathFromHead`, registered in both `jenova_core.nimble` and `usage()`
+so it is discoverable from the binary. **Proven to fail with the fix reverted.**
+
+Report hygiene, applied rather than listed: V-15 closed in report 07 with a note that it
+read `open` for two sessions after the fix; Phase 5.1 closed in report 05, with report 06
+§4 credited for having had it right throughout; the maths phase restated in reports 02
+and 05 — it is unlinked, not unpainted, and the remainder is the import, the fourth block
+kind, the branch, *then* the draw; report 04 §4.3 retired along with the OS guards it
+describes; and the census, widget-count, module-size and self-test-count figures
+re-derived across reports 02, 03, 04, 06 and 07. Report 03 gained a section recording the
+five new findings, pointing at `PROGRESS.md` rather than restating them, so the two
+cannot drift.
+
+### Verification, second half
+
+`nimble core` and `nimble gui` build. **Twenty of the twenty-two self-tests pass**;
+`serve` and `relay` were not run. `routes-selftest` is listed by `--help`.
+
+### Continued — retrieval liveness, the three missing trackers, Phase 0.2
+
+**`rag.query` now filters deleted rows.** Report 03 named this as the shared root of two
+of its deferred findings. Unfiling on delete stays and is still the primary mechanism;
+this is the backstop under it, and it is needed because every `forget*` call runs inside
+`api.indexing`, which swallows failures on purpose — so a skipped unfile left deleted
+content answering queries, with the deletion honoured everywhere except in what the model
+recalls.
+
+**The first attempt at it was wrong and the existing suite caught it.** Testing
+`is_deleted=0` treats an absent row and a deleted row as the same claim, and two of
+R-15's assertions — which index a note by title with no matching row — went red. An
+absent row is not a deletion: this codebase soft-deletes throughout, so a missing row
+means something else entirely. Only an explicit flag drops a hit now.
+
+**The three trackers the Workspace Architecture mandates and nobody had written** —
+`BLUEPRINT.md`, `ARCHITECTURE_MAPPING.md`, `TESTS.md` — are in, built from the source
+traced this session rather than from the reports, and carrying no line numbers or counts
+by design.
+
+**Phase 0.2 is closed.** `AGENTS.md` now carries report 04 §3's budgets and the two
+prohibitions that produced the original pollution — no cross-reference labels, no history.
+The budgets are the half that keeps getting skipped, and the census shows it: coverage was
+added while volume was not cut, and the total moved the wrong way.
+
+### Verification, third part
+
+`nimble core` and `nimble gui` build. **Twenty of the twenty-two self-tests pass.** The
+retrieval gate was proven to fail with the filter disabled.
+
+### Next steps
+
+Rule on D5, D6 and V-17. Run the listener suites when permitted. Take the FreeBSD work now
+that the host is the target — all of it needs the program run. M-3: import the two maths
+modules into `gui.nim`, add `bkMath`, build the branch, then draw.

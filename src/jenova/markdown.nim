@@ -5,7 +5,7 @@
 import std/[strutils, tables]
 
 type
-  BlockKind* = enum bkText, bkCode, bkTable
+  BlockKind* = enum bkText, bkCode, bkTable, bkMath
   Block* = object
     kind*: BlockKind
     text*: string
@@ -1017,6 +1017,85 @@ proc parse*(content: string): seq[Block] =
 
     var i = 0
     while i < lines.len:
+      let s = lines[i].strip
+      # Action purpose: display math fences are lifted to standalone blocks;
+      # an unclosed fence is left as text so streaming does not swallow tail.
+      # Action purpose: an empty fence is text, as an empty inline formula is —
+      # the fence is consumed either way, so a dropped block takes the user's
+      # own line with it. Put back verbatim rather than left to the multi-line
+      # branch below, which would read the same `$$` as an opening fence.
+      if s.startsWith("$$") and s.endsWith("$$") and s.len >= 4:
+        let body = s[2 .. ^3].strip
+        if body.len == 0:
+          pending.add lines[i]
+          inc i
+          continue
+        flushText()
+        outp.add Block(kind: bkMath, text: body, complete: true)
+        inc i
+        continue
+
+      if s.startsWith(r"\[") and s.endsWith(r"\]") and s.len >= 4:
+        let body = s[2 .. ^3].strip
+        if body.len == 0:
+          pending.add lines[i]
+          inc i
+          continue
+        flushText()
+        outp.add Block(kind: bkMath, text: body, complete: true)
+        inc i
+        continue
+
+      if s.startsWith("$$"):
+        var closeIdx = -1
+        for j in (i + 1) ..< lines.len:
+          if lines[j].strip.endsWith("$$"):
+            closeIdx = j
+            break
+        if closeIdx > i:
+          var mlines: seq[string] = @[]
+          let firstRest = s[2 .. ^1].strip
+          if firstRest.len > 0: mlines.add firstRest
+          for k in (i + 1) ..< closeIdx:
+            mlines.add lines[k]
+          let lastRest = lines[closeIdx].strip[0 .. ^3].strip
+          if lastRest.len > 0: mlines.add lastRest
+          let body = mlines.join("\n").strip
+          # An empty pair of fence lines is text, by the rule above.
+          if body.len == 0:
+            for k in i .. closeIdx: pending.add lines[k]
+            i = closeIdx + 1
+            continue
+          flushText()
+          outp.add Block(kind: bkMath, text: body, complete: true)
+          i = closeIdx + 1
+          continue
+
+      if s.startsWith(r"\["):
+        var closeIdx = -1
+        for j in (i + 1) ..< lines.len:
+          if lines[j].strip.endsWith(r"\]"):
+            closeIdx = j
+            break
+        if closeIdx > i:
+          var mlines: seq[string] = @[]
+          let firstRest = s[2 .. ^1].strip
+          if firstRest.len > 0: mlines.add firstRest
+          for k in (i + 1) ..< closeIdx:
+            mlines.add lines[k]
+          let lastRest = lines[closeIdx].strip[0 .. ^3].strip
+          if lastRest.len > 0: mlines.add lastRest
+          let body = mlines.join("\n").strip
+          # An empty pair of fence lines is text, by the rule above.
+          if body.len == 0:
+            for k in i .. closeIdx: pending.add lines[k]
+            i = closeIdx + 1
+            continue
+          flushText()
+          outp.add Block(kind: bkMath, text: body, complete: true)
+          i = closeIdx + 1
+          continue
+
       # A header row, a separator row, then rows until something that is not
       # one. The separator is what makes it a table at all.
       if i + 1 < lines.len and lines[i].contains('|') and

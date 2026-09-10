@@ -41,8 +41,9 @@ gui_build: the composer is at the bottom of the window and takes typing
 gui_build: PASS
 ```
 
-All nineteen self-tests pass — the seventeen that existed plus `asset` and `inspect`, both added
-in session 9. `jenova --check` exits 0.
+Every self-test passes — the seventeen that existed plus `asset` and `inspect`, both added in
+session 9, `math`, `pipeline` and `rag`, and `routes` added on 2026-09-09; twenty-two registered.
+`jenova --check` exits 0. *(This read "All nineteen" and was already short by two when written.)*
 
 **The answer to the opening question is therefore "almost".** Sessions 7 and 8 pinned
 `ac61ecf`, set `-d:adwminor=4`, and took the window from 18 owlkettle widgets to 39. What was
@@ -356,7 +357,7 @@ as a code defect.
 | V-12 | `tests/gui_check.sh:31` still passes `-d:gtk48` | stale | XS | **done**, and the claim is now self-enforcing |
 | V-13 | Four owlkettle gaps found by using it — upstream candidates, not defects here | upstream | — | recorded |
 | V-14 | `--check` never builds anything behind an `if …Open` | coverage | S | **done** |
-| V-15 | A renamed file asset can restore the wrong copy and report success | **data** | M | open |
+| V-15 | A renamed file asset can restore the wrong copy and report success | **data** | M | **done** — `restoreMirror` collects every matching sidecar and takes the newest by the trash name's own epoch prefix, with the sidecar's mtime as tie-break and the path last so two equal candidates resolve the same way on every run. This row read `open` for two sessions after the fix landed |
 | V-16 | A settings help string containing markup blanks its own row | display | XS | **done** — the string, and then the general form: `jenova_core.nim:5174-5182` walks `settings.Defs` and fails the build on a raw `<`, `>` or `&` |
 | V-17 | The reports' line citations drift on every commit | audit trail | S | **open** — open findings re-derived; the class needs symbol-bearing citations |
 
@@ -377,8 +378,13 @@ the pinned revision, and the mechanism kept because the *new* reading also says 
 
 | ID | Finding |
 |---|---|
-| **V-17** | **The reports' line citations drift on every commit and nothing notices** — 209 of them point into files changed since the last pass. The open findings are re-derived; the class needs symbol-bearing citations. See below. |
-| **V-15** | **A renamed file asset can restore the wrong copy, and report success.** Renaming trashes the pre-rename file under a sidecar carrying the **row id** (`api.nim:280` → `fssync.trashFileAsset`, `fssync.nim:572`); deleting later writes a *second* sidecar with the same id (`api.nim:569`). `restoreMirror` (`fssync.nim:820-863`) returns on the **first** sidecar whose `type` and `id` match, in `walkDirRec` order — which is directory order. So rename → delete → restore restores the **pre-rename** copy to the **pre-rename path** roughly half the time, answers `rmRestored`, and leaves the file the user actually deleted sitting in the trash. Reproduced directly. **The same shape applies to notes**, which take the identical rename-trash path in `mirrorUpsert` (`api.nim:202`). The fix is a decision about restore semantics rather than a patch — probably "prefer the newest sidecar", since the trash name carries an epoch prefix — so it is reported, not taken. |
+| **V-17** | **The reports' line citations drift on every commit and nothing notices** — 209 of them point into files changed since the last pass. The open findings are re-derived; the class needs symbol-bearing citations. See below. **Re-measured 2026-09-09 and it is worse than this row states**: of seventeen high-value citations resolved by hand, three landed on what they name. `gui.nim` has grown 5,472 → 7,246 lines since the last correction pass. |
+
+**V-15 has been closed** and is recorded in the tracker above. It was fixed in
+`fssync.restoreMirror` — every matching sidecar is collected and the newest wins, read
+from the trash name's own epoch prefix — which is the resolution this row proposed and
+declined to take. The row went on saying `open` for two sessions afterwards, which is the
+V-17 class arriving in a state field rather than in a line number.
 
 **This section used to list seven findings under the heading "four", five of them already
 recorded as done in the tracker above.** It is now the tracker's open rows and nothing else.

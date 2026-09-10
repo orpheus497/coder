@@ -14,7 +14,7 @@
 ## shared.
 
 import std/[net, nativesockets, posix, os, strutils, strformat, times, monotimes,
-            atomics]
+            atomics, tables]
 import ./http
 import ./db
 import ./routes
@@ -22,6 +22,7 @@ import ./upstream
 import ./api
 
 import ./pipeline
+import ./rag
 # For the one intent value that is not worth a header.
 import ./prompts
 import ./inspect
@@ -290,7 +291,8 @@ proc handle(client: Socket, class: RouteClass, workerId: int): bool =
     # once it has run; empty means the relay is untouched.
     var diagHeaders = ""
     if req.body.len > 0:
-      let prepared = pipeline.prepare(req.body)
+      let scope = rag.parseScope(req.headers.getOrDefault("x-jenova-scope", ""))
+      let prepared = pipeline.prepare(req.body, scope = scope)
       cacheKey = prepared.cacheKey
       # Built before the cache is consulted, because a hit needs them too: they
       # describe *this* request, and a cached reply that carried the previous

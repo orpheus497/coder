@@ -56,7 +56,7 @@
 ## which can; the preference is a runtime one, the same shape as `fetch(1)`
 ## before `curl`.
 
-import std/[os, strutils]
+import std/[os, strutils, tables]
 import ./pkgconfig
 # For `MathConstants`, which this module fills in rather than mirroring. No
 # cycle: `mathtex` imports only `std`, which is what keeps it assertable
@@ -149,6 +149,7 @@ proc hb_font_destroy(f: HbFont)
 proc hb_font_set_scale(f: HbFont, xScale, yScale: cint)
 proc hb_font_get_nominal_glyph(f: HbFont, unicode: HbCodepoint,
                                glyph: var HbCodepoint): HbBool
+proc hb_font_get_glyph_h_advance(f: HbFont, glyph: HbCodepoint): HbPosition
 proc hb_ot_math_has_data(f: HbFace): HbBool
 proc hb_ot_math_get_constant(f: HbFont, c: cint): HbPosition
 proc hb_ot_math_get_glyph_italics_correction(f: HbFont,
@@ -158,6 +159,11 @@ proc hb_ot_math_get_glyph_variants(f: HbFont, g: HbCodepoint, dir: cint,
                                    variantsCount: ptr cuint,
                                    variants: pointer): cuint
 {.pop.}
+
+type
+  HbGlyphVariant {.bycopy.} = object
+    glyph: HbCodepoint
+    advance: HbPosition
 
 type
   ## An open maths font, and the one thing a caller may ask that is not a
@@ -390,6 +396,7 @@ const FontCandidates* = [
   ("Latin Modern Math", "latinmodern-math.otf"),
   ("STIX Two Math", "STIXTwoMath-Regular.otf"),
   ("STIX Math", "STIXMath-Regular.otf"),
+  ("DejaVu Math TeX Gyre", "DejaVuMathTeXGyre.ttf"),
   ("TeX Gyre Pagella Math", "texgyrepagella-math.otf"),
   ("TeX Gyre Termes Math", "texgyretermes-math.otf"),
   ("GNU FreeSerif", "FreeSerif.ttf"),
@@ -425,16 +432,29 @@ proc chooseFont*(): tuple[found: bool, font: MathFont] =
     # substitution problem in another costume.
     return (false, MathFont(path: override, family: "unusable override"))
 
+  # Action purpose: one walk per root, not one per candidate per root. The roots
+  # are system font trees of many thousands of files, and six candidates over
+  # five roots walked them thirty times to answer a question one pass over each
+  # answers. The basenames are collected first and the preference order is
+  # applied afterwards, so which font wins is unchanged.
+  # Every copy is kept, in root order, because an unusable one must not stop a
+  # second copy of the same file in a later root from being tried.
+  var found: Table[string, seq[string]]
+  for root in FontRoots:
+    if not dirExists(root): continue
+    for path in walkDirRec(root):
+      let name = path.extractFilename
+      if found.hasKey(name): found[name].add path
+      else: found[name] = @[path]
+
   for (family, filename) in FontCandidates:
-    for root in FontRoots:
-      if not dirExists(root): continue
-      for path in walkDirRec(root):
-        if path.extractFilename != filename: continue
-        var f = openFont(path)
-        if f.usable():
-          f.family = family
-          return (true, f)
-        f.close()
+    if not found.hasKey(filename): continue
+    for path in found[filename]:
+      var f = openFont(path)
+      if f.usable():
+        f.family = family
+        return (true, f)
+      f.close()
   (false, MathFont())
 
 ## Function purpose: read every constant the layout consumes, once.
@@ -566,3 +586,117 @@ proc unavailableReason*(): string =
     " under " & FontRoots.join(", ") &
     ". Set JENOVA_MATH_FONT to a font file with an OpenType MATH table, " &
     "or install one. Formulae render as their own source until then."
+
+proc decodeRunes(s: string): seq[int] =
+  var i = 0
+  while i < s.len:
+    let c = uint8(s[i])
+    var cp: int = 0
+    var need = 0
+    if (c and 0x80'u8) == 0:
+      cp = int(c)
+      need = 0
+    elif (c and 0xE0'u8) == 0xC0'u8:
+      cp = int(c and 0x1F'u8)
+      need = 1
+    elif (c and 0xF0'u8) == 0xE0'u8:
+      cp = int(c and 0x0F'u8)
+      need = 2
+    elif (c and 0xF8'u8) == 0xF0'u8:
+      cp = int(c and 0x07'u8)
+      need = 3
+    else:
+      inc i
+      continue
+    inc i
+    while need > 0 and i < s.len:
+      let b = uint8(s[i])
+      if (b and 0xC0'u8) != 0x80'u8: break
+      cp = (cp shl 6) or int(b and 0x3F'u8)
+      dec need
+      inc i
+    result.add cp
+
+## Function purpose: assemble a mathtex.MathFont backed by the opened font file.
+proc buildMathLayoutFont*(f: var MathFont): mathtex.MathFont =
+  let constants = if f.usable: f.readConstants() else: defaultConstants()
+  let fontHandle = f.font
+
+  let measure = proc (text: string, size: float, upright: bool): mathtex.GlyphBox =
+    var totalAdvance: float = 0.0
+    ## Whether the font answered for a rune — resolution, not width. A zero
+    ## advance is a metric a font gives: a combining mark occupies no width of
+    ## its own. The fallback below is for a glyph the font does not have.
+    var resolved = false
+    let runes = decodeRunes(text)
+    if not pointer(fontHandle).isNil:
+      for cp in runes:
+        var g: HbCodepoint
+        if hb_font_get_nominal_glyph(fontHandle, HbCodepoint(cp), g) != 0:
+          totalAdvance += float(hb_font_get_glyph_h_advance(fontHandle, g)) /
+                          float(UnitsPerEm) * size
+          resolved = true
+        else:
+          totalAdvance += 0.55 * size
+    if not resolved:
+      totalAdvance = float(max(1, runes.len)) * 0.55 * size
+
+    mathtex.GlyphBox(
+      width: totalAdvance,
+      ascent: 0.75 * size,
+      descent: 0.25 * size,
+      italicCorrection: (if upright: 0.0 else: 0.08 * size)
+    )
+
+  let variants = proc (text: string, size: float): seq[mathtex.MathVariant] =
+    const StretchyChars = ["(", ")", "[", "]", "{", "}", "√", "∑", "∫", "∥", "∣", "|"]
+    if text notin StretchyChars: return @[]
+    let runes = decodeRunes(text)
+    if not pointer(fontHandle).isNil and runes.len > 0:
+      let firstCp = runes[0]
+      var g: HbCodepoint
+      if hb_font_get_nominal_glyph(fontHandle, HbCodepoint(firstCp), g) != 0:
+        # Action purpose: the same IN/OUT contract `verticalVariantCount` documents.
+        # A zero-capacity call leaves `count` at the number *written*, which is
+        # zero by construction — so reading the total out of it took this branch
+        # to `if 0 > 0` on every font and the synthetic fallback below ran even
+        # for a face carrying eight real sizes. The total is the return value;
+        # `count` is only ever how many the second call actually filled in.
+        var count: cuint = 0
+        let total = hb_ot_math_get_glyph_variants(fontHandle, g, HbDirectionTtb, 0, addr count, nil)
+        if total > 0:
+          var vBuf = newSeq[HbGlyphVariant](total)
+          count = total
+          discard hb_ot_math_get_glyph_variants(fontHandle, g, HbDirectionTtb, 0, addr count, addr vBuf[0])
+          vBuf.setLen(int(count))
+          for v in vBuf:
+            let adv = float(v.advance) / float(UnitsPerEm) * size
+            let itCorr = float(hb_ot_math_get_glyph_italics_correction(fontHandle, v.glyph)) / float(UnitsPerEm) * size
+            result.add mathtex.MathVariant(
+              width: 0.55 * size,
+              ascent: 0.8 * adv,
+              descent: 0.2 * adv,
+              italicCorrection: itCorr,
+              # Action purpose: the index the metrics were read from, carried so
+              # the drawing phase asks this face for that shape. A size variant
+              # has no codepoint to reach it by.
+              glyph: uint32(v.glyph)
+            )
+          if result.len > 0: return result
+
+    const StretchFactors = [1.0, 1.5, 2.0, 3.0]
+    for factor in StretchFactors:
+      let ext = factor * size
+      result.add mathtex.MathVariant(
+        width: 0.55 * size,
+        ascent: 0.8 * ext,
+        descent: 0.2 * ext,
+        italicCorrection: (if text in ["∑", "∫"]: 0.05 * ext else: 0.0)
+      )
+
+  mathtex.MathFont(constants: constants, measure: measure, variants: variants)
+
+## Function purpose: assemble a fallback mathtex.MathFont using Latin Modern default constants.
+proc buildDefaultMathFont*(): mathtex.MathFont =
+  var dummy = MathFont()
+  buildMathLayoutFont(dummy)

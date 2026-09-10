@@ -11,11 +11,10 @@
 ## project level and to everything nested at workspace level; and files have no
 ## FOCUS concept at all.
 ##
-## Known limit: there is no token budget here, so a large workspace can overflow
-## the context on its own. The second half of this note used to read "bounding it
-## here alone buys nothing while the history is also untrimmed" — the history is
-## trimmed now, and a request that dropped turns says so in `X-Jenova-Trimmed`,
-## so that is no longer a reason to leave this unbounded.
+## The assembled block is bounded by `MaxContextBytes` and its bodies are read
+## one at a time, for rows the scoping kept. Both matter: the block enters the
+## system message, which `pipeline.trimHistory` never drops, and this runs on
+## the window's own thread on every send.
 
 import std/[strutils, tables]
 import ./db
@@ -25,13 +24,24 @@ const
   ## reworded heading is a different prompt.
   ContextHeading* = "[CURRENT WORKSPACE ARTIFACTS (Notes & Files)]:"
 
+  ## The ceiling on one assembled block. It is appended to the system message,
+  ## and `pipeline.trimHistory` never drops a system message — so without a
+  ## bound here a large workspace makes every turn drop the entire conversation
+  ## and still exceed the context, with the trim counted against a history that
+  ## was not the cause.
+  MaxContextBytes* = 64 * 1024
+
 type
   Note* = object
+    ## `content` is empty on a row read for scoping alone; `id` is what fetches
+    ## it once the scoping has decided the row is wanted.
+    id*: string
     title*, content*: string
     folderId*, projectId*, workspaceId*: string
     isFocus*: bool
 
   FileAsset* = object
+    id*: string
     name*, kind*, content*: string
     folderId*, projectId*, workspaceId*: string
 
@@ -47,19 +57,51 @@ proc isFocusValue*(raw: string): bool =
 ## site. A soft-deleted note is in the trash, and the model quoting it back
 ## makes the deletion look ignored exactly where the user would notice.
 proc allNotes*(): seq[Note] =
-  for r in db.query("SELECT title, content, folderId, projectId, workspaceId, " &
-                    "isFocusNote FROM notes WHERE is_deleted=0"):
+  for r in db.query("SELECT id, title, content, folderId, projectId, " &
+                    "workspaceId, isFocusNote FROM notes WHERE is_deleted=0"):
     result.add Note(
-      title: r[0], content: r[1], folderId: r[2], projectId: r[3],
-      workspaceId: r[4], isFocus: isFocusValue(r[5]))
+      id: r[0], title: r[1], content: r[2], folderId: r[3], projectId: r[4],
+      workspaceId: r[5], isFocus: isFocusValue(r[6]))
 
 ## Function purpose: the file half of the same rule, excluded the same way.
 proc allFiles*(): seq[FileAsset] =
-  for r in db.query("SELECT name, type, content, folderId, projectId, " &
+  for r in db.query("SELECT id, name, type, content, folderId, projectId, " &
                     "workspaceId FROM fileAssets WHERE is_deleted=0"):
     result.add FileAsset(
-      name: r[0], kind: r[1], content: r[2], folderId: r[3], projectId: r[4],
+      id: r[0], name: r[1], kind: r[2], content: r[3], folderId: r[4],
+      projectId: r[5], workspaceId: r[6])
+
+## Function purpose: the same rows without their bodies, which is what the
+## scoping below actually reads. Selecting `content` for every live row
+## materialises every note and every uploaded document in the database, and
+## `contextFor` runs on the window's own thread on every send.
+proc noteScopes*(): seq[Note] =
+  for r in db.query("SELECT id, title, folderId, projectId, workspaceId, " &
+                    "isFocusNote FROM notes WHERE is_deleted=0"):
+    result.add Note(
+      id: r[0], title: r[1], folderId: r[2], projectId: r[3],
+      workspaceId: r[4], isFocus: isFocusValue(r[5]))
+
+## Function purpose: the file half of the same rule.
+proc fileScopes*(): seq[FileAsset] =
+  for r in db.query("SELECT id, name, type, folderId, projectId, " &
+                    "workspaceId FROM fileAssets WHERE is_deleted=0"):
+    result.add FileAsset(
+      id: r[0], name: r[1], kind: r[2], folderId: r[3], projectId: r[4],
       workspaceId: r[5])
+
+## Function purpose: one body, fetched only once the scoping has decided the row
+## belongs in the prompt.
+proc noteBody*(id: string): string =
+  if id.len == 0: return ""
+  let rows = db.query("SELECT content FROM notes WHERE id=?", id)
+  if rows.len > 0 and rows[0].len > 0: rows[0][0] else: ""
+
+## Function purpose: the file half of the same rule.
+proc fileBody*(id: string): string =
+  if id.len == 0: return ""
+  let rows = db.query("SELECT content FROM fileAssets WHERE id=?", id)
+  if rows.len > 0 and rows[0].len > 0: rows[0][0] else: ""
 
 ## Function purpose: built once per call rather than queried per note, because
 ## the scoping below asks the same question of every row.
@@ -88,9 +130,10 @@ proc focusLevel(n: Note): string =
 ## Action purpose: the branches are ordered folder, project, workspace, global,
 ## and global means artifacts belonging to nothing at all rather than to
 ## everything.
-proc contextFor*(folderId, projectId, workspaceId: string): string =
-  let notes = allNotes()
-  let files = allFiles()
+proc contextFor*(folderId, projectId, workspaceId: string,
+                 maxBytes = MaxContextBytes): string =
+  let notes = noteScopes()
+  let files = fileScopes()
   let folderOf = folderParents()
   let projectOf = projectParents()
 
@@ -179,26 +222,83 @@ proc contextFor*(folderId, projectId, workspaceId: string): string =
     # And no FOCUS notes: a focus note is a rule for a workspace, and a global
     # chat is in none.
 
+  # Action purpose: bodies are read here, one at a time, and only for rows the
+  # scoping above kept. The budget is spent in the order FOCUS, notes, files
+  # because a FOCUS note is a rule and the other two are material — losing a
+  # rule changes how everything else is read.
+  #
+  # An entry that does not fit is skipped and counted rather than truncated: a
+  # shortened note reads as a whole one and is answered as though it were.
+  var spent = 0
+  var omitted = 0
+
+  proc room(n: int): bool =
+    if spent + n > maxBytes:
+      inc omitted
+      return false
+    spent += n
+    true
+
+  ## Function purpose: whether the budget can still admit anything at all, so
+  ## the remainder is counted without a `SELECT content` and a body per row.
+  ##
+  ## Action purpose: **the read is the cost, not the accumulation** — this runs
+  ## on the window's own thread on every send. Not "the next entry does not
+  ## fit": a smaller row further down still fits a partly spent budget.
+  proc exhausted(): bool = spent >= maxBytes
+
   if targetFocus.len > 0:
     var any = false
     var block1 = "--- FOCUS / RULES ---\n"
     for n in targetFocus:
+      # Counted, not read: an empty focus note is counted here rather than read
+      # to discover it contributes nothing, which is the cost being refused.
+      if exhausted():
+        inc omitted
+        continue
       # An empty focus note contributes nothing rather than a bare heading.
-      if n.content.strip.len == 0: continue
+      let body = noteBody(n.id)
+      if body.strip.len == 0: continue
+      let entry = "[" & n.focusLevel & "] " & n.title & "\n" & body & "\n\n"
+      if not room(entry.len): continue
       any = true
-      block1.add "[" & n.focusLevel & "] " & n.title & "\n" & n.content & "\n\n"
+      block1.add entry
     if any: result.add block1
 
   if targetNotes.len > 0:
-    result.add "--- NOTES ---\n"
+    var any = false
+    var block2 = "--- NOTES ---\n"
     for n in targetNotes:
-      result.add "Title: " & n.title & "\nContent: " & n.content & "\n\n"
+      if exhausted():
+        inc omitted
+        continue
+      let entry = "Title: " & n.title & "\nContent: " & noteBody(n.id) & "\n\n"
+      if not room(entry.len): continue
+      any = true
+      block2.add entry
+    if any: result.add block2
 
   if targetFiles.len > 0:
-    result.add "--- FILES ---\n"
+    var any = false
+    var block3 = "--- FILES ---\n"
     for f in targetFiles:
-      result.add "File: " & f.name & " (Type: " & f.kind & ")\n"
-      if f.content.len > 0:
-        result.add "Content:\n" & f.content & "\n\n"
+      if exhausted():
+        inc omitted
+        continue
+      let body = fileBody(f.id)
+      var entry = "File: " & f.name & " (Type: " & f.kind & ")\n"
+      if body.len > 0:
+        entry.add "Content:\n" & body & "\n\n"
       else:
-        result.add "(Binary file, content not available for direct reading)\n\n"
+        entry.add "(Binary file, content not available for direct reading)\n\n"
+      if not room(entry.len): continue
+      any = true
+      block3.add entry
+    if any: result.add block3
+
+  # Named rather than silent: a model answering without an artefact the user can
+  # see in the sidebar is the one failure they cannot diagnose from the window.
+  if omitted > 0:
+    result.add "--- " & $omitted & " further workspace artefact" &
+               (if omitted == 1: "" else: "s") &
+               " omitted to fit the context budget ---\n"

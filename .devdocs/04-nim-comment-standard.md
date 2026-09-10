@@ -54,6 +54,17 @@ undocumented routines have fallen by 69** — the coverage inversion §2's D-05 
 corrected from the under-commented end, which is the half worth correcting. The comment share of
 the file set has drifted *down* slightly, 32.5% to 31.2%, so the growth has not been prose.
 
+> **Re-run 2026-09-09, and the drift has reversed.** 44 files, **31,109 lines**, **10,096 comment
+> lines — 32.4%**, prefixed blocks **1,179**. So the share is back to where it started and the
+> target in §3.5 is ~9%. The one measure that improved is D-04's: comment lines carrying
+> `**markdown bold**` are down from 671 to **164**.
+>
+> The reading above still holds and is the point: batches 1 and 2 added coverage where it was
+> missing and cut no volume where it was excessive, and everything written since has been written
+> at the old density. `composer.nim` is **59.4%** comment and `upstream.nim` **51.4%** — both
+> inside the batch this report calls done. **Batch 3 should not start until that is settled**,
+> because continuing the same shape over 26 more files makes the number worse, not better.
+
 > The re-measured FFI row is omitted rather than guessed: a count of `importc`/`dynlib`/`header:`
 > on the declaration line alone gives 30, which is not comparable to the original 82 because that
 > figure included declarations inheriting the pragma from an enclosing `{.push .}`. Re-deriving it
@@ -321,13 +332,23 @@ Everything in this table is **code**, not comments, and therefore strictly outsi
 is listed so the sweep does not touch it by accident, and so the three user-facing cases can be
 raised separately.
 
-### 4.3 The build cannot be run here
+### 4.3 ~~The build cannot be run here~~ — obsolete on both counts
 
-`src/jenova_core.nim:19` and `src/jenova_gui.nim:20` refuse to compile off FreeBSD
-(`{.error: "jenova-core targets FreeBSD only — see docs/install.md.".}`). The project targets Nim
-2.2.10 with GTK4/libadwaita and owlkettle; this container has Nim 1.6.14 on Linux with neither.
-**No binary can be produced and no self-test can be executed here.** §5 is what is achievable
-instead, and its limits are stated rather than implied.
+**As written this section said `src/jenova_core.nim:19` and `src/jenova_gui.nim:20` refuse to
+compile off FreeBSD, so no binary could be produced and no self-test executed. Neither half
+still holds.**
+
+The OS guards are gone. `jenova_core.nim`'s header records their removal and the argument for it:
+nothing under `src/jenova/` carries an OS conditional, so there was no branch for the guard to
+prevent, and the guard's cost was that every check ran against a patched copy and reported a
+portability problem that does not exist. Report 07 §0 still describes neutralising those two lines
+in a scratch tree; there is nothing left to neutralise.
+
+And the environment moved. The workspace this is now read in is the FreeBSD target reached through
+the Linuxulator, with Nim 2.2.10 native: both binaries build and the self-tests run directly.
+
+§5's harness remains useful as a comment-only differential, but it is no longer the *only* thing
+achievable — a batch can now be gated on a real build and a real suite.
 
 ---
 

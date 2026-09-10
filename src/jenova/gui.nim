@@ -27,7 +27,7 @@
 ## stripping and the cache all apply identically — and a bug in that path cannot
 ## show up in one client and not the other. The socket is raw rather than
 ## `std/httpclient` because a localhost request needs no TLS stack.
-import std/[algorithm, atomics, base64, json, net, os, oids, osproc, posix,
+import std/[algorithm, atomics, base64, json, math, net, os, oids, osproc, posix,
             streams,
             strutils, tables, times]
 import owlkettle
@@ -45,6 +45,11 @@ import ./rag
 import ./server
 import ./api
 import ./markdown
+import ./mathtex
+import ./mathfont
+# For the FreeType flags the variant-glyph draw path needs, through the same
+# template every other hand-written binding uses.
+import ./pkgconfig
 import ./fssync
 import ./sourceview
 import ./nvimctl
@@ -149,6 +154,7 @@ type
     host: string
     port: int
     body: string
+    scopeHeader: string
 
   ControlJob = object
     action: string
@@ -293,11 +299,18 @@ proc streamOnce(job: StreamJob) =
     sock = newSocket()
     sock.connect(job.host, Port(job.port))
     streamFd.store(sock.getFd().int)
-    sock.send("POST /v1/chat/completions HTTP/1.1\r\n" &
-              "Host: " & job.host & "\r\n" &
-              "Content-Type: application/json\r\n" &
-              "Connection: close\r\n" &
-              "Content-Length: " & $job.body.len & "\r\n\r\n" & job.body)
+    var reqStr = "POST /v1/chat/completions HTTP/1.1\r\n" &
+                 "Host: " & job.host & "\r\n" &
+                 "Content-Type: application/json\r\n" &
+                 "Connection: close\r\n"
+    if job.scopeHeader.len > 0:
+      var safeScope = ""
+      for c in job.scopeHeader:
+        if c notin {'\r', '\n'}: safeScope.add c
+      if safeScope.len > 0:
+        reqStr.add "X-Jenova-Scope: " & safeScope & "\r\n"
+    reqStr.add "Content-Length: " & $job.body.len & "\r\n\r\n" & job.body
+    sock.send(reqStr)
 
     let statusLine = sock.recvLine(timeout = 120_000)
     let parts = statusLine.split(' ')
@@ -2181,9 +2194,11 @@ proc postConversation(app: AppState, continuing = false) =
   # of its own. An unassigned chat resolves to the global scope, which is *not*
   # everything — see `workspace.contextFor`.
   var wsCtx = ""
+  var scopeHdr = ""
   for c in app.convs:
     if c.id == app.convId:
       wsCtx = workspace.contextFor(c.folderId, c.projectId, c.workspaceId)
+      scopeHdr = rag.formatScope(c.folderId, c.projectId, c.workspaceId)
       break
   let body = pipeline.chatBody(msgs, continuing, app.opts, wsCtx)
   # Action purpose: measured after `chatBody`, so it counts the workspace
@@ -2197,7 +2212,7 @@ proc postConversation(app: AppState, continuing = false) =
   # so a generation that fails before a response head leaves the panel empty
   # instead of describing the turn before it.
   app.diag = inspect.Diagnostics()
-  streamReq.send(StreamJob(host: "127.0.0.1", port: port, body: body))
+  streamReq.send(StreamJob(host: "127.0.0.1", port: port, body: body, scopeHeader: scopeHdr))
 
 ## Function purpose: a conversation's name, taken from the message that started
 ## it. The Web UI titles a chat from its first message and this window
@@ -2296,6 +2311,19 @@ var thumbCache: Table[string, Pixbuf]
 ## Insertion order, so the oldest decoded thumbnails can be dropped.
 var thumbOrder: seq[string]
 
+## The laid-out form of each display formula, keyed by its source. Filled by
+## `mathLayoutFor`, which is where the reasoning lives; declared here because
+## `clearRenderMemos` below is what empties it.
+var mathLayoutCache: Table[string, ref mathtex.MathLayout]
+## Insertion order, so the oldest layouts can be dropped. Same shape as
+## `thumbOrder`, and bounded for the same reason.
+var mathLayoutOrder: seq[string]
+
+const MathLayoutCacheCap = 64
+  ## Far more displayed formulae than a transcript shows at once, so the cap
+  ## does not engage while reading; `clearRenderMemos` is what recovers the
+  ## memory on a conversation switch.
+
 const ThumbCacheCap = 64
   ## How many decoded thumbnails may be held.
   ##
@@ -2392,6 +2420,12 @@ proc clearRenderMemos() =
   attachMemo.clear()
   thumbCache.clear()
   thumbOrder.setLen(0)
+  # The chosen font deliberately survives: it is a property of the machine
+  # rather than of the conversation, and re-walking five system font trees on
+  # every conversation switch is exactly the cost `mathFontInitialized` exists
+  # to pay once. Only the laid-out formulae go.
+  mathLayoutCache.clear()
+  mathLayoutOrder.setLen(0)
 
 ## Function purpose: one call for every per-message cache, so a message edited
 ## or deleted cannot stay rendered from a stale parse in one of them.
@@ -2791,6 +2825,42 @@ proc gtk_adjustment_get_page_size(a: GtkAdjustment): cdouble {.importc, cdecl.}
 proc gtk_scrolled_window_set_policy(sw: GtkWidget, h, v: cint) {.importc, cdecl.}
 proc gtk_scrolled_window_set_max_content_height(
   sw: GtkWidget, h: cint) {.importc, cdecl.}
+
+proc cairo_show_text(ctx: CairoContext, text: cstring) {.importc, cdecl.}
+proc cairo_save(ctx: CairoContext) {.importc, cdecl.}
+proc cairo_restore(ctx: CairoContext) {.importc, cdecl.}
+
+## Action purpose: a maths font's size variants are unmapped glyphs — no
+## codepoint reaches `parenleft.size3` — so drawing one means naming an index in
+## the face `mathfont` measured. Cairo's text API selects a face by family name
+## and can land on a different file, where the same index is a different shape,
+## so the face is built from the very file HarfBuzz opened.
+##
+## FreeType is not a new dependency in the sense that matters: Cairo is built on
+## it and GTK links both. `pkg-config` is asked for the flags for the reason
+## `mathfont` gives.
+pkgConfig("freetype2", "print/freetype2")
+
+type
+  FtLibrary = distinct pointer
+  FtFace = distinct pointer
+  CairoFontFace = distinct pointer
+  ## `cairo_glyph_t`. The index is the face's own; x and y are the origin the
+  ## glyph is drawn from, in user space, exactly as `cairo_show_text` uses the
+  ## current point.
+  CairoGlyph = object
+    index: culong
+    x, y: cdouble
+
+proc FT_Init_FreeType(lib: ptr FtLibrary): cint {.importc, cdecl.}
+proc FT_New_Face(lib: FtLibrary, path: cstring, faceIndex: clong,
+                 face: ptr FtFace): cint {.importc, cdecl.}
+proc cairo_ft_font_face_create_for_ft_face(
+  face: FtFace, loadFlags: cint): CairoFontFace {.importc, cdecl.}
+proc cairo_font_face_status(face: CairoFontFace): cint {.importc, cdecl.}
+proc cairo_set_font_face(ctx: CairoContext, face: CairoFontFace) {.importc, cdecl.}
+proc cairo_show_glyphs(ctx: CairoContext, glyphs: ptr CairoGlyph,
+                       count: cint) {.importc, cdecl.}
 
 const
   ## `GtkPolicyType`. Named rather than passed as bare integers, because
@@ -3452,6 +3522,188 @@ const
   ## popover still has the window to sit in.
   CodePreviewPx = (720, 480)
 
+const
+  MathDisplayFontSize = 16.0
+  MathPadX = 12.0
+  MathPadY = 8.0
+
+## Function purpose: parse a hex color into (r, g, b) floats for Cairo drawing.
+proc parseHexColor(s: string): tuple[r, g, b: float] =
+  let clean = if s.startsWith("#"): s[1..^1] else: s
+  if clean.len == 6:
+    try:
+      let v = parseHexInt(clean)
+      result = (float((v shr 16) and 0xFF) / 255.0,
+                float((v shr 8) and 0xFF) / 255.0,
+                float(v and 0xFF) / 255.0)
+    except ValueError:
+      result = (0.94, 0.93, 0.95)
+  else:
+    result = (0.94, 0.93, 0.95)
+
+var
+  activeChosenFont: mathfont.MathFont
+  cachedMathFont: mathtex.MathFont
+  cachedMathFamily: string
+  ## Whether `chooseFont` found a face that passed all three of its questions.
+  ## **The caller must render source text when this is false.** The previous
+  ## form fell back to `buildDefaultMathFont` and drew anyway, which is the one
+  ## thing `mathfont`'s header says not to do: that font has no handles, so
+  ## every advance is a flat 0.55 em guess and every delimiter is a synthetic
+  ## stretch, drawn in whatever "serif" resolves to. The result is a formula
+  ## that looks laid out and is not — and a formula drawn badly is worse than
+  ## one drawn plainly, because only one of the two tells the reader to
+  ## distrust it.
+  mathFontAvailable = false
+  mathFontInitialized = false
+  ## The same file `mathfont` measured, as a Cairo face. Held for the life of
+  ## the process because the Cairo face borrows the FreeType one and neither
+  ## may be freed while the other is drawn with.
+  mathFtLib: FtLibrary
+  mathFtFace: FtFace
+  mathGlyphFace: CairoFontFace
+  ## Whether a glyph index may be drawn. False leaves every glyph on the text
+  ## path, which is the same picture the renderer drew before the face existed.
+  mathGlyphFaceOk = false
+
+## Function purpose: open the chosen font file as a Cairo face, so a variant
+## glyph can be drawn by index.
+##
+## Action purpose: failure is silent and total — a face that does not open
+## leaves `mathGlyphFaceOk` false and the text path draws every glyph. Drawing
+## an index into a face that is not the measured one is the one outcome worth
+## refusing outright: it is not a worse shape, it is a different character.
+proc initMathGlyphFace(path: string) =
+  if path.len == 0: return
+  if FT_Init_FreeType(addr mathFtLib) != 0: return
+  if FT_New_Face(mathFtLib, path.cstring, 0, addr mathFtFace) != 0: return
+  mathGlyphFace = cairo_ft_font_face_create_for_ft_face(mathFtFace, 0)
+  mathGlyphFaceOk = not pointer(mathGlyphFace).isNil and
+                    cairo_font_face_status(mathGlyphFace) == 0
+
+## Function purpose: resolve the maths font once, at startup, off the render
+## path.
+##
+## Action purpose: `chooseFont` walks five system font trees and reads a MATH
+## table out of every candidate — a cost the GTK thread must not pay when a
+## formula first comes into sight. Idempotent: a second call is the guard.
+proc initMathFont() =
+  if mathFontInitialized: return
+  var (found, chosen) = mathfont.chooseFont()
+  if found:
+    activeChosenFont = chosen
+    cachedMathFamily = chosen.family
+    cachedMathFont = mathfont.buildMathLayoutFont(activeChosenFont)
+    initMathGlyphFace(chosen.path)
+  mathFontAvailable = found
+  mathFontInitialized = true
+
+## Function purpose: return the cached mathtex.MathFont, the family name to
+## draw it in, and whether there is a usable font at all. A pure read of what
+## `initMathFont` settled — never a probe, because every caller is drawing.
+proc getActiveMathLayoutFont(): (mathtex.MathFont, string, bool) =
+  (cachedMathFont, cachedMathFamily, mathFontAvailable)
+
+## Function purpose: the laid-out form of one display formula, memoised.
+##
+## `renderMath` parses the source and runs Appendix G over it. `mdBlock` is on
+## the render path, so without this that ran once per displayed formula per
+## redraw — and with `timings_per_token` the transcript redraws several times a
+## second while a reply streams, over every formula already on screen.
+##
+## Keyed on the source alone because the other two inputs cannot vary: the font
+## is chosen once per process and `MathDisplayFontSize` is a constant. A `ref`
+## rather than a value so a hit hands back the box tree instead of deep-copying
+## `MathBox.children` on every frame. The table itself is declared beside the
+## other render memos, above the `clearRenderMemos` that empties it.
+proc mathLayoutFor(src: string, font: mathtex.MathFont): ref mathtex.MathLayout =
+  if mathLayoutCache.hasKey(src): return mathLayoutCache[src]
+  new(result)
+  result[] = mathtex.renderMath(src, font, MathDisplayFontSize, display = true)
+  # A refusal is cached too. It is deterministic in the source, and re-parsing
+  # a formula the parser has already rejected is the same wasted work as
+  # re-laying out one it accepted.
+  mathLayoutOrder.add src
+  # Batch eviction, for the reason `markdown.evict` gives: this runs from
+  # `view`, where a per-insert `delete(0)` is an O(n) shift.
+  if mathLayoutOrder.len > MathLayoutCacheCap:
+    let drop = max(1, MathLayoutCacheCap div 4)
+    for i in 0 ..< drop: mathLayoutCache.del(mathLayoutOrder[i])
+    mathLayoutOrder = mathLayoutOrder[drop .. ^1]
+  mathLayoutCache[src] = result
+
+## Function purpose: recursively draw a laid-out MathBox tree onto a Cairo context.
+proc drawMathBox(ctx: CairoContext, b: mathtex.MathBox, ox, oy: float,
+                 fontFam: string, fg: tuple[r, g, b: float]) =
+  let curX = ox + b.x
+  let curY = oy + b.y
+
+  case b.kind
+  of bxRule:
+    ctx.setSource(fg.r, fg.g, fg.b)
+    ctx.rectangle(curX, curY - b.ascent, b.width, b.ascent + b.descent)
+    ctx.fill()
+  of bxGlyph:
+    # Action purpose: the variant the metrics came from is drawn as itself. A
+    # face-level index only means something against the face it was read from,
+    # so the text path takes over wherever that face could not be opened.
+    #
+    # Scaled only to reach a height no variant had: the glyph's own extent is
+    # what `ascent + descent` already holds, so scaling it by the base glyph's
+    # rule would stretch a shape that is already the right size.
+    if b.variantGlyph != 0 and mathGlyphFaceOk:
+      ctx.setSource(fg.r, fg.g, fg.b)
+      let totalH = b.ascent + b.descent
+      let scaleY = if b.stretchTo > 0.0 and totalH > 0.0: b.stretchTo / totalH
+                   else: 1.0
+      cairo_save(ctx)
+      ctx.translate(curX, curY)
+      if scaleY != 1.0: ctx.scale(1.0, scaleY)
+      cairo_set_font_face(ctx, mathGlyphFace)
+      ctx.fontSize = b.fontSize
+      var g = CairoGlyph(index: culong(b.variantGlyph), x: 0.0, y: 0.0)
+      cairo_show_glyphs(ctx, addr g, 1)
+      cairo_restore(ctx)
+    elif b.text.len > 0:
+      ctx.setSource(fg.r, fg.g, fg.b)
+      let totalH = b.ascent + b.descent
+      let scaleY = if b.fontSize > 0.0: totalH / b.fontSize else: 1.0
+      if scaleY > 1.1 or b.stretchTo > 0.0 or b.variant >= 0:
+        cairo_save(ctx)
+        ctx.translate(curX, curY)
+        ctx.scale(1.0, scaleY)
+        ctx.moveTo(0.0, 0.0)
+        ctx.fontSize = b.fontSize
+        ctx.selectFontFace(fontFam,
+                           if b.upright: FontSlantNormal else: FontSlantItalic,
+                           FontWeightNormal)
+        cairo_show_text(ctx, b.text.cstring)
+        cairo_restore(ctx)
+      else:
+        ctx.moveTo(curX, curY)
+        ctx.fontSize = b.fontSize
+        ctx.selectFontFace(fontFam,
+                           if b.upright: FontSlantNormal else: FontSlantItalic,
+                           FontWeightNormal)
+        cairo_show_text(ctx, b.text.cstring)
+  of bxList:
+    for child in b.children:
+      drawMathBox(ctx, child, curX, curY, fontFam, fg)
+
+## Function purpose: paint display math box centered horizontally within the drawing area.
+proc drawMathBoxRoot(ctx: CairoContext, b: mathtex.MathBox, size: (int, int),
+                     fontFam: string) =
+  let
+    w = float(size[0])
+    h = float(size[1])
+  if w <= 0 or h <= 0: return
+
+  let fg = parseHexColor(theme.active().fg)
+  let rootY = MathPadY + b.ascent
+  let rootX = max(MathPadX, (w - b.width) / 2.0)
+
+  drawMathBox(ctx, b, rootX, rootY, fontFam, fg)
+
 ## Function purpose: render one markdown block as a widget. Extracted from
 ## `messageBody` (8c-3) so a note is shown through the transcript's own
 ## renderer — tables, capped code blocks, the copy button and all — instead of
@@ -3504,6 +3756,52 @@ proc mdBlock(app: AppState, b: markdown.Block): Widget =
                 wrap = true
                 style = [StyleClass(
                   if rowIdx == 0: "md-th" else: "md-td")]
+  elif b.kind == bkMath:
+    # Not `mathFont`: Nim folds case and underscores, so a local of that name
+    # is the same identifier as the `mathfont` module and shadows every
+    # qualified call to it in this branch.
+    let (layoutFont, fontFam, haveFont) = getActiveMathLayoutFont()
+    # Nothing is laid out and nothing is drawn without a font. The source-text
+    # path below is the whole of the no-font behaviour, which is what
+    # `mathfont.unavailableReason` promises the user: "formulae render as their
+    # own source until then."
+    let layoutRes = if haveFont: mathLayoutFor(b.text, layoutFont) else: nil
+    if layoutRes.isNil or not layoutRes.ok:
+      gui:
+        Frame:
+          style = [StyleClass("code-block")]
+          Box(orient = OrientY, spacing = 4, margin = 8):
+            Label:
+              text = b.text
+              wrap = true
+              xAlign = 0.0
+              style = [StyleClass("msg-body")]
+            # Action purpose: a label beside the formula it explains, because
+            # `view` runs on every frame and the notice line is state — writing
+            # it from here is a change made while rendering, and one toast per
+            # formula per redraw. It names the files and the directories.
+            if not haveFont:
+              Label:
+                text = mathfont.unavailableReason()
+                wrap = true
+                xAlign = 0.0
+                style = [StyleClass("dim-note")]
+    else:
+      let
+        reqW = max(24, int(ceil(layoutRes.box.width)) + int(MathPadX * 2.0))
+        reqH = max(24, int(ceil(layoutRes.box.ascent + layoutRes.box.descent)) +
+                      int(MathPadY * 2.0))
+      gui:
+        ContentScroll:
+          style = [StyleClass("md-math")]
+          DrawingArea:
+            sizeRequest = (reqW, reqH)
+            proc draw(ctx: CairoContext, size: (int, int)): bool =
+              # The `ref` is captured, not the box: capturing `box` would deep
+              # copy the tree into the closure for every formula on every
+              # rebuild, which is the cost the memo above is for.
+              drawMathBoxRoot(ctx, layoutRes.box, size, fontFam)
+              false
   else:
     gui:
       Frame:
@@ -7080,6 +7378,9 @@ proc run*(withTray = true, checkOnly = false) =
   # and a search path appended later would be too late for the blocks already on
   # screen. Silent on failure by design — see `installScheme`.
   sourceview.installScheme(p.state / "styles")
+  # Before the window exists for the same reason: the probe walks the system
+  # font trees, and the first displayed formula must not pay for it.
+  initMathFont()
   # the clipboard callback is a bare C function and cannot be handed the
   # paths object, so where a pasted image is written is set once, here.
   # The same owned subdirectory the decoder writes to, so pasted images are

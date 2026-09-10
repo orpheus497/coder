@@ -18,6 +18,52 @@
 import std/[json, sets, strutils, strformat, algorithm, math, tables, times,
             httpclient]
 import ./db
+import ./workspace
+
+type
+  ScopeContext* = object
+    folderId*: string
+    projectId*: string
+    workspaceId*: string
+
+proc sanitizeScopePart(s: string): string =
+  result = newStringOfCap(s.len)
+  for c in s:
+    if c notin {'\r', '\n'}: result.add c
+
+## Function purpose: serialises container identifiers into the wire format.
+proc formatScope*(folderId = "", projectId = "", workspaceId = ""): string =
+  "folder=" & sanitizeScopePart(folderId) &
+  ";project=" & sanitizeScopePart(projectId) &
+  ";workspace=" & sanitizeScopePart(workspaceId)
+
+## Function purpose: parses container scope from a header string or JSON body.
+proc parseScope*(raw: string): ScopeContext =
+  let s = raw.strip()
+  if s.len == 0: return
+  if s.startsWith("{"):
+    try:
+      let j = parseJson(s)
+      result.folderId = j{"folderId"}.getStr(j{"folder"}.getStr(""))
+      result.projectId = j{"projectId"}.getStr(j{"project"}.getStr(""))
+      result.workspaceId = j{"workspaceId"}.getStr(j{"workspace"}.getStr(""))
+      return
+    except CatchableError:
+      discard
+  for part in s.split(';'):
+    let pair = part.strip()
+    if pair.len == 0: continue
+    let eq = pair.find('=')
+    if eq > 0:
+      let k = pair[0 ..< eq].strip().toLowerAscii()
+      let v = pair[eq + 1 .. ^1].strip()
+      case k
+      of "folder", "folderid", "folder_id":
+        result.folderId = v
+      of "project", "projectid", "project_id":
+        result.projectId = v
+      of "workspace", "workspaceid", "workspace_id":
+        result.workspaceId = v
 
 const
   ChunkWords* = 300      ## words per chunk
@@ -555,6 +601,55 @@ proc ftsQueryString(query: string): string =
       terms.add "\"" & t & "\""
   terms.join(" OR ")
 
+## Function purpose: whether the row a chunk was filed from is still live.
+##
+## Action purpose: **defence in depth, not a replacement for unfiling.** Every
+## delete path calls `forgetMessage`, `forgetNote`, `forgetFileAsset` or
+## `forgetConversation`, and those stay. But each of them runs inside the
+## caller's `indexing` guard, which swallows a failure on purpose — retrieval
+## degrading is not worth a user's note — so a skipped unfile leaves deleted
+## content answering queries with nothing anywhere to show it. That is the one
+## failure the user cannot see: the deletion is honoured everywhere except in
+## what the model recalls.
+##
+## The path shapes are this module's own (`chatPath`, `notePath`,
+## `fileAssetPath`), so nothing outside it has to agree about the format. An
+## unrecognised root answers live rather than dead: dropping what cannot be
+## classified would silently empty retrieval for any writer added later.
+##
+## Action purpose: **only an explicit `is_deleted` flag drops a hit; an absent
+## row does not.** The two are different claims and conflating them is a
+## behaviour change rather than a guard. Deletion here is soft throughout — rows
+## are flagged and never removed — so a missing row means something other than
+## deletion: an index entry filed under a synthetic path, or one whose row a
+## migration or a test hard-removed. Treating absence as death would empty
+## retrieval for all of them, which is the failure this proc exists to avoid
+## pointed the other way.
+proc pathIsLive(path: string): bool =
+  let parts = path.split('/')
+  if parts.len == 0: return true
+
+  proc flaggedDeleted(table, id: string): bool =
+    if id.len == 0: return false
+    db.query("SELECT 1 FROM " & table & " WHERE id=? AND is_deleted<>0",
+             id).len > 0
+
+  case parts[0]
+  of ChatRoot:
+    # chat/<convId>/<role>/<msgId> — the message, not the conversation, because
+    # a single turn can be deleted out of a live chat, and a conversation delete
+    # flags every message it holds.
+    if parts.len < 4: return true
+    not flaggedDeleted("messages", parts[3])
+  of NoteRoot:
+    if parts.len < 2: return true
+    not flaggedDeleted("notes", parts[1])
+  of FileRoot:
+    if parts.len < 2: return true
+    not flaggedDeleted("fileAssets", parts[1])
+  else:
+    true
+
 ## Function purpose: read from the stored chunk text rather than from the
 ## original file, which may have changed or gone since it was indexed.
 proc snippetFor(path: string, startLine: int): string =
@@ -565,6 +660,84 @@ proc snippetFor(path: string, startLine: int): string =
     result = rows[0][0]
     if result.len > SnippetChars:
       result = result[0 ..< SnippetChars]
+
+type
+  ItemScope = tuple[folderId, projectId, workspaceId: string]
+
+## Function purpose: preloads note container scopes once per query, avoiding per-path database reads.
+proc noteContainers*(): Table[string, ItemScope] =
+  for r in db.query("SELECT id, folderId, projectId, workspaceId FROM notes"):
+    if r.len >= 4: result[r[0]] = (r[1], r[2], r[3])
+
+## Function purpose: preloads file asset container scopes once per query.
+proc fileContainers*(): Table[string, ItemScope] =
+  for r in db.query("SELECT id, folderId, projectId, workspaceId FROM fileAssets"):
+    if r.len >= 4: result[r[0]] = (r[1], r[2], r[3])
+
+## Function purpose: preloads conversation container scopes once per query.
+proc conversationContainers*(): Table[string, ItemScope] =
+  for r in db.query("SELECT id, folderId, projectId, workspaceId FROM conversations"):
+    if r.len >= 4: result[r[0]] = (r[1], r[2], r[3])
+
+## Function purpose: decides whether an index path falls within the active retrieval scope.
+proc inScope*(path: string, scope: ScopeContext,
+             folderOf, projectOf: Table[string, string],
+             noteOf, fileOf, convOf: Table[string, ItemScope]): bool =
+  let parts = path.split('/')
+  var found = false
+  var itemFolder = ""
+  var itemProject = ""
+  var itemWorkspace = ""
+
+  if parts.len >= 2:
+    case parts[0]
+    of ChatRoot:
+      let convId = parts[1]
+      if convOf.hasKey(convId):
+        found = true
+        let sc = convOf[convId]
+        itemFolder = sc.folderId
+        itemProject = sc.projectId
+        itemWorkspace = sc.workspaceId
+    of NoteRoot:
+      let noteId = parts[1]
+      if noteOf.hasKey(noteId):
+        found = true
+        let sc = noteOf[noteId]
+        itemFolder = sc.folderId
+        itemProject = sc.projectId
+        itemWorkspace = sc.workspaceId
+    of FileRoot:
+      let fileId = parts[1]
+      if fileOf.hasKey(fileId):
+        found = true
+        let sc = fileOf[fileId]
+        itemFolder = sc.folderId
+        itemProject = sc.projectId
+        itemWorkspace = sc.workspaceId
+    else:
+      discard
+
+  # Action purpose: unfiled artifacts and synthetic test paths have no container,
+  # so they are retrievable only in global non-workspace mode.
+  if not found:
+    return scope.folderId.len == 0 and scope.projectId.len == 0 and scope.workspaceId.len == 0
+
+  let effPid = if itemProject.len > 0: itemProject
+               elif itemFolder.len > 0: folderOf.getOrDefault(itemFolder, "")
+               else: ""
+  let effWid = if itemWorkspace.len > 0: itemWorkspace
+               elif effPid.len > 0: projectOf.getOrDefault(effPid, "")
+               else: ""
+
+  if scope.folderId.len > 0:
+    itemFolder == scope.folderId
+  elif scope.projectId.len > 0:
+    effPid == scope.projectId
+  elif scope.workspaceId.len > 0:
+    effWid == scope.workspaceId
+  else:
+    itemFolder.len == 0 and effPid.len == 0 and effWid.len == 0
 
 ## Function purpose: mixes the two score families, each normalised by the
 ## maximum within this result set. Normalising against the set rather than an
@@ -577,9 +750,27 @@ proc snippetFor(path: string, startLine: int): string =
 ##
 ## `pathFilter` matches a path exactly or as a directory prefix.
 proc query*(queryStr: string, topK = 5, withSnippets = true,
-            pathFilter = ""): seq[Hit] =
+            pathFilter = "", scope: ScopeContext = ScopeContext()): seq[Hit] =
   if queryStr.strip().len == 0: return @[]
   if documentCount() == 0: return @[]
+
+  let folderOf = workspace.folderParents()
+  let projectOf = workspace.projectParents()
+  let noteOf = noteContainers()
+  let fileOf = fileContainers()
+  let convOf = conversationContainers()
+  var scopeCache = initTable[string, bool]()
+
+  proc checkScope(p: string): bool =
+    if scopeCache.hasKey(p):
+      return scopeCache[p]
+    let ok = inScope(p, scope, folderOf, projectOf, noteOf, fileOf, convOf)
+    scopeCache[p] = ok
+    ok
+
+  proc passesFilter(p: string): bool =
+    (pathFilter.len == 0 or p == pathFilter or p.startsWith(pathFilter & "/")) and
+    checkScope(p)
 
   var bm: seq[tuple[path: string, score: float]]
   if ftsOk():
@@ -629,6 +820,7 @@ proc query*(queryStr: string, topK = 5, withSnippets = true,
       if cols.len < 2 or blob.len == 0: continue
       let s = dotBlob(qv, blob)
       if s <= SemanticFloor: continue
+      if not checkScope(cols[0]): continue
       let line = try: parseInt(cols[1]) except ValueError: 1
       let idx = at.getOrDefault(cols[0], -1)
       if idx < 0:
@@ -638,9 +830,6 @@ proc query*(queryStr: string, topK = 5, withSnippets = true,
         best[idx].score = s
         best[idx].startLine = line
     sem = best
-
-  proc passesFilter(p: string): bool =
-    pathFilter.len == 0 or p == pathFilter or p.startsWith(pathFilter & "/")
 
   var merged: seq[Hit]
   var maxBm = 0.0
@@ -675,7 +864,18 @@ proc query*(queryStr: string, topK = 5, withSnippets = true,
       else: nb
 
   merged.sort(proc (a, b: Hit): int = cmp(b.score, a.score))
-  if merged.len > topK: merged.setLen topK
+
+  # Action purpose: the liveness check runs after the sort and before the
+  # ceiling, so a deleted row costs its own slot rather than the whole answer.
+  # Filtering after `setLen` would return four hits where five were asked for
+  # and five live ones existed; walking the sorted list until `topK` are found
+  # keeps the result full. The lookup is one indexed read per hit examined, and
+  # on the ordinary path — nothing deleted — that is exactly `topK` of them.
+  var live: seq[Hit]
+  for h in merged:
+    if live.len >= topK: break
+    if pathIsLive(h.path): live.add h
+  merged = live
 
   if withSnippets:
     for i in 0 ..< merged.len:

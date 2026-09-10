@@ -167,6 +167,12 @@ type
     width*: float
     ascent*, descent*: float
     italicCorrection*: float
+    ## The face's own index for this variant. A size variant is usually
+    ## unmapped — no codepoint names `parenleft.size3` — so its index is the
+    ## only way to ask for the shape rather than a scaled base character.
+    ## Zero is `.notdef` and means the variant carries no glyph of its own,
+    ## which is what a synthesised list has.
+    glyph*: uint32
 
   ## The two questions layout has to ask a font. Supplying them as closures is
   ## what keeps this module free of the shaping library.
@@ -196,6 +202,11 @@ type
       ## vertical variant list, which the drawing phase re-reads from the same
       ## font and so gets the same glyph.
       variant*: int
+      ## The chosen variant's own index in the face, carried so the drawing
+      ## phase can ask for that shape. Zero means draw `text`: a face-level
+      ## index is meaningless to a drawing phase that has no face, and a base
+      ## glyph has no variant to name.
+      variantGlyph*: uint32
       ## Non-zero when even the largest variant is too short and the glyph must
       ## be built from its extensible parts to reach this height.
       stretchTo*: float
@@ -810,8 +821,9 @@ proc variantList(f: MathFont, text: string, size: float): seq[MathVariant] =
 ## are what a glyph that never grows keeps.
 proc glyphBox(text: string, size: float, upright: bool, g: GlyphBox): MathBox =
   MathBox(kind: bxGlyph, text: text, fontSize: size, upright: upright,
-          variant: -1, stretchTo: 0.0, width: g.width, ascent: g.ascent,
-          descent: g.descent, italicCorrection: g.italicCorrection)
+          variant: -1, variantGlyph: 0, stretchTo: 0.0, width: g.width,
+          ascent: g.ascent, descent: g.descent,
+          italicCorrection: g.italicCorrection)
 
 proc container(children: seq[MathBox]): MathBox =
   ## The container's own extents are the union of its children's, measured in
@@ -920,26 +932,33 @@ proc layoutFrac(n: MathNode, f: MathFont, baseSize: float,
   result.width = w
 
 ## Function purpose: pick the vertical variant that first reaches `needed`.
-## Returning the index rather than a glyph name is what lets the drawing phase
-## ask the same font for the same variant; `stretch` non-zero means no variant
-## was tall enough and the glyph has to be assembled from its parts.
+## `stretch` non-zero means no variant was tall enough and the glyph has to be
+## assembled from its parts.
+##
+## Action purpose: the face's glyph index rides along with the metrics. The
+## index alone identifies the shape the metrics were taken from, so a drawing
+## phase holding the same face draws that shape rather than a scaled base
+## character; the list position is kept beside it for a caller that re-reads the
+## list instead.
 proc pickVariant(f: MathFont, text: string, size, needed: float):
-    tuple[box: GlyphBox, variant: int, stretch: float] =
+    tuple[box: GlyphBox, variant: int, stretch: float, glyph: uint32] =
   let base = measureRun(f, text, size, true)
   if base.ascent + base.descent >= needed:
-    return (base, -1, 0.0)
+    return (base, -1, 0.0, 0'u32)
   let vs = variantList(f, text, size)
   for i in 0 ..< vs.len:
     if vs[i].ascent + vs[i].descent >= needed:
       return (GlyphBox(width: vs[i].width, ascent: vs[i].ascent,
                        descent: vs[i].descent,
-                       italicCorrection: vs[i].italicCorrection), i, 0.0)
+                       italicCorrection: vs[i].italicCorrection), i, 0.0,
+              vs[i].glyph)
   if vs.len > 0:
     let last = vs[^1]
     return (GlyphBox(width: last.width, ascent: last.ascent,
                      descent: last.descent,
-                     italicCorrection: last.italicCorrection), vs.len - 1, needed)
-  (base, -1, needed)
+                     italicCorrection: last.italicCorrection), vs.len - 1,
+            needed, last.glyph)
+  (base, -1, needed, 0'u32)
 
 ## Function purpose: a delimiter grown to cover its contents and centred on the
 ## axis, which is what makes the two halves of `\left( … \right)` the same
@@ -947,9 +966,10 @@ proc pickVariant(f: MathFont, text: string, size, needed: float):
 proc layoutDelimiter(f: MathFont, text: string, size, axis, needed: float): MathBox =
   if text.len == 0:
     return MathBox(kind: bxList, width: 0.0, ascent: 0.0, descent: 0.0)
-  let (g, variant, stretch) = pickVariant(f, text, size, needed)
+  let (g, variant, stretch, glyph) = pickVariant(f, text, size, needed)
   result = glyphBox(text, size, true, g)
   result.variant = variant
+  result.variantGlyph = glyph
   result.stretchTo = stretch
   # Centre the glyph on the axis: its own midpoint sits `axis` above the
   # baseline of the box it is placed in.
@@ -1056,13 +1076,14 @@ proc layoutRadical(n: MathNode, f: MathFont, baseSize: float,
                     else: mc.radicalVerticalGap), sz)
   let inner = rad.ascent + rad.descent
   let needed = inner + gap + theta
-  let (g, variant, stretch) = pickVariant(f, "√", sz, needed)
+  let (g, variant, stretch, glyph) = pickVariant(f, "√", sz, needed)
   let have = g.ascent + g.descent
   # A variant taller than asked for leaves slack; TeX gives half of it to the
   # gap so the radicand sits centred under the rule rather than pinned to it.
   if have > needed: gap += (have - needed) / 2.0
   var surd = glyphBox("√", sz, true, g)
   surd.variant = variant
+  surd.variantGlyph = glyph
   surd.stretchTo = stretch
   let ruleTop = -(rad.ascent + gap + theta)
   surd.x = 0.0
@@ -1102,13 +1123,15 @@ proc layoutBigOp(n: MathNode, f: MathFont, baseSize: float,
   var g: GlyphBox
   var variant = -1
   var stretch = 0.0
+  var glyph = 0'u32
   if isDisplay(st) and not n.opUpright:
     let needed = du(mc, mc.displayOperatorMinHeight, sz)
-    (g, variant, stretch) = pickVariant(f, n.opText, sz, needed)
+    (g, variant, stretch, glyph) = pickVariant(f, n.opText, sz, needed)
   else:
     g = measureRun(f, n.opText, sz, n.opUpright)
   result = glyphBox(n.opText, sz, n.opUpright, g)
   result.variant = variant
+  result.variantGlyph = glyph
   result.stretchTo = stretch
   if not n.opUpright:
     # A symbol operator is centred on the axis; a word operator like `lim` is

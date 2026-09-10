@@ -47,6 +47,9 @@ import ./api
 import ./markdown
 import ./mathtex
 import ./mathfont
+# For the FreeType flags the variant-glyph draw path needs, through the same
+# template every other hand-written binding uses.
+import ./pkgconfig
 import ./fssync
 import ./sourceview
 import ./nvimctl
@@ -2827,6 +2830,38 @@ proc cairo_show_text(ctx: CairoContext, text: cstring) {.importc, cdecl.}
 proc cairo_save(ctx: CairoContext) {.importc, cdecl.}
 proc cairo_restore(ctx: CairoContext) {.importc, cdecl.}
 
+## Action purpose: a maths font's size variants are unmapped glyphs — no
+## codepoint reaches `parenleft.size3` — so drawing one means naming an index in
+## the face `mathfont` measured. Cairo's text API selects a face by family name
+## and can land on a different file, where the same index is a different shape,
+## so the face is built from the very file HarfBuzz opened.
+##
+## FreeType is not a new dependency in the sense that matters: Cairo is built on
+## it and GTK links both. `pkg-config` is asked for the flags for the reason
+## `mathfont` gives.
+pkgConfig("freetype2", "print/freetype2")
+
+type
+  FtLibrary = distinct pointer
+  FtFace = distinct pointer
+  CairoFontFace = distinct pointer
+  ## `cairo_glyph_t`. The index is the face's own; x and y are the origin the
+  ## glyph is drawn from, in user space, exactly as `cairo_show_text` uses the
+  ## current point.
+  CairoGlyph = object
+    index: culong
+    x, y: cdouble
+
+proc FT_Init_FreeType(lib: ptr FtLibrary): cint {.importc, cdecl.}
+proc FT_New_Face(lib: FtLibrary, path: cstring, faceIndex: clong,
+                 face: ptr FtFace): cint {.importc, cdecl.}
+proc cairo_ft_font_face_create_for_ft_face(
+  face: FtFace, loadFlags: cint): CairoFontFace {.importc, cdecl.}
+proc cairo_font_face_status(face: CairoFontFace): cint {.importc, cdecl.}
+proc cairo_set_font_face(ctx: CairoContext, face: CairoFontFace) {.importc, cdecl.}
+proc cairo_show_glyphs(ctx: CairoContext, glyphs: ptr CairoGlyph,
+                       count: cint) {.importc, cdecl.}
+
 const
   ## `GtkPolicyType`. Named rather than passed as bare integers, because
   ## `set_policy(w, 1, 2)` at the call site says nothing about what it does.
@@ -3521,6 +3556,30 @@ var
   ## distrust it.
   mathFontAvailable = false
   mathFontInitialized = false
+  ## The same file `mathfont` measured, as a Cairo face. Held for the life of
+  ## the process because the Cairo face borrows the FreeType one and neither
+  ## may be freed while the other is drawn with.
+  mathFtLib: FtLibrary
+  mathFtFace: FtFace
+  mathGlyphFace: CairoFontFace
+  ## Whether a glyph index may be drawn. False leaves every glyph on the text
+  ## path, which is the same picture the renderer drew before the face existed.
+  mathGlyphFaceOk = false
+
+## Function purpose: open the chosen font file as a Cairo face, so a variant
+## glyph can be drawn by index.
+##
+## Action purpose: failure is silent and total — a face that does not open
+## leaves `mathGlyphFaceOk` false and the text path draws every glyph. Drawing
+## an index into a face that is not the measured one is the one outcome worth
+## refusing outright: it is not a worse shape, it is a different character.
+proc initMathGlyphFace(path: string) =
+  if path.len == 0: return
+  if FT_Init_FreeType(addr mathFtLib) != 0: return
+  if FT_New_Face(mathFtLib, path.cstring, 0, addr mathFtFace) != 0: return
+  mathGlyphFace = cairo_ft_font_face_create_for_ft_face(mathFtFace, 0)
+  mathGlyphFaceOk = not pointer(mathGlyphFace).isNil and
+                    cairo_font_face_status(mathGlyphFace) == 0
 
 ## Function purpose: resolve the maths font once, at startup, off the render
 ## path.
@@ -3535,6 +3594,7 @@ proc initMathFont() =
     activeChosenFont = chosen
     cachedMathFamily = chosen.family
     cachedMathFont = mathfont.buildMathLayoutFont(activeChosenFont)
+    initMathGlyphFace(chosen.path)
   mathFontAvailable = found
   mathFontInitialized = true
 
@@ -3584,7 +3644,27 @@ proc drawMathBox(ctx: CairoContext, b: mathtex.MathBox, ox, oy: float,
     ctx.rectangle(curX, curY - b.ascent, b.width, b.ascent + b.descent)
     ctx.fill()
   of bxGlyph:
-    if b.text.len > 0:
+    # Action purpose: the variant the metrics came from is drawn as itself. A
+    # face-level index only means something against the face it was read from,
+    # so the text path takes over wherever that face could not be opened.
+    #
+    # Scaled only to reach a height no variant had: the glyph's own extent is
+    # what `ascent + descent` already holds, so scaling it by the base glyph's
+    # rule would stretch a shape that is already the right size.
+    if b.variantGlyph != 0 and mathGlyphFaceOk:
+      ctx.setSource(fg.r, fg.g, fg.b)
+      let totalH = b.ascent + b.descent
+      let scaleY = if b.stretchTo > 0.0 and totalH > 0.0: b.stretchTo / totalH
+                   else: 1.0
+      cairo_save(ctx)
+      ctx.translate(curX, curY)
+      if scaleY != 1.0: ctx.scale(1.0, scaleY)
+      cairo_set_font_face(ctx, mathGlyphFace)
+      ctx.fontSize = b.fontSize
+      var g = CairoGlyph(index: culong(b.variantGlyph), x: 0.0, y: 0.0)
+      cairo_show_glyphs(ctx, addr g, 1)
+      cairo_restore(ctx)
+    elif b.text.len > 0:
       ctx.setSource(fg.r, fg.g, fg.b)
       let totalH = b.ascent + b.descent
       let scaleY = if b.fontSize > 0.0: totalH / b.fontSize else: 1.0

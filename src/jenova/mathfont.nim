@@ -676,7 +676,11 @@ proc buildMathLayoutFont*(f: var MathFont): mathtex.MathFont =
               width: 0.55 * size,
               ascent: 0.8 * adv,
               descent: 0.2 * adv,
-              italicCorrection: itCorr
+              italicCorrection: itCorr,
+              # Action purpose: the index the metrics were read from, carried so
+              # the drawing phase asks this face for that shape. A size variant
+              # has no codepoint to reach it by.
+              glyph: uint32(v.glyph)
             )
           if result.len > 0: return result
 

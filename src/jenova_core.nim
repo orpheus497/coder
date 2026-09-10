@@ -2546,6 +2546,39 @@ proc main() =
               near(only(lay("\\frac{1}{2}").box).ascent,
                    only(lay("\\frac{1}{2}").box).ascent))
 
+      # Action purpose: a size variant has no codepoint — nothing names
+      # `parenleft.size3` — so the index its metrics were read from is the only
+      # way to ask a face for that shape. Asserted on the carry rather than on
+      # a face, which is what keeps this a test with no font in it.
+      block theChosenVariantCarriesItsFaceIndex:
+        let numbered = proc (text: string,
+                             size: float): seq[mathtex.MathVariant] =
+          if text notin stretchy: return @[]
+          for i, factor in StretchAt:
+            let ext = factor * size
+            result.add mathtex.MathVariant(
+              width: 0.5 * size, ascent: 0.8 * ext, descent: 0.2 * ext,
+              italicCorrection: 0.0, glyph: uint32(700 + i))
+        let idFont = mathtex.MathFont(constants: mc, measure: measure,
+                                      variants: numbered)
+        let grown = only(mathtex.renderMath("\\left(\\frac{1}{2}\\right)",
+                                            idFont, Size, true).box)
+        check("a grown delimiter carries the index of the variant it measured",
+              grown.children[0].variantGlyph ==
+                700'u32 + uint32(grown.children[0].variant),
+              $grown.children[0].variantGlyph & " for variant " &
+                $grown.children[0].variant)
+        let assembled = only(mathtex.renderMath(
+          "\\left(\\frac{\\frac{1}{2}}{\\frac{1}{2}}\\right)",
+          idFont, Size, true).box)
+        check("...and so does the largest, where none is tall enough",
+              assembled.children[0].variantGlyph ==
+                700'u32 + uint32(StretchAt.len - 1),
+              $assembled.children[0].variantGlyph)
+        check("a synthesised variant list names no glyph, so the text is drawn",
+              only(lay("\\left(\\frac{1}{2}\\right)").box)
+                .children[0].variantGlyph == 0'u32)
+
       # Action purpose: **the layout is driven by the table `mathfont` actually
       # produces, not only by the fixture above.** Every assertion up to here
       # uses a hand-written `MathConstants` of round numbers, which is what

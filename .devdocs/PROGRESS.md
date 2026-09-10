@@ -3,6 +3,8 @@
 Milestone ledger. One line per completed, superseded or removed feature or bug.
 Newest first.
 
+- 2026-09-10T03:18Z — Display maths draws the font's own size variant instead of a vertically scaled base character: `mathtex.MathVariant` and `MathBox` carry the face's glyph index, `mathfont` fills it from HarfBuzz, and `gui` opens the measured font file as a Cairo face through FreeType and draws by index, falling back to the text path wherever the face cannot be opened. FreeType flags come through `pkgconfig`. Gated by 3 new math-selftest assertions on the index carry, and proved against `DejaVu Math TeX Gyre` on an image surface: the chosen variant draws at 2.88x the base parenthesis height.
+
 - 2026-09-10T02:59Z — Full suite run on this host: twenty-two self-tests, the six shell suites and `gui_check.sh` all pass. Only the mapped-window tier remains unrun, for want of `Xvfb`, `xdotool` and `xclip`.
 
 - 2026-09-10T02:59Z — Review round on PR #118 answered: empty display-math fences kept as text in markdown, glyph resolution separated from advance width in mathfont so a zero-advance combining mark is not padded, workspace context stops reading bodies once the budget is spent, and chunked and unsupported-transfer-encoding refusals drain the peer under a byte cap, a total deadline and a quiet-peer stop before answering. Gated by 3 new markdown assertions and a live 413-under-send check; full self-test set, six shell suites, `serve-selftest` and `gui_check` green.

@@ -91,10 +91,9 @@ is what makes "the daemon is up" and "the client port answers" incapable of disa
 - Partial entity updates preserve existing stored fields across both in-process and HTTP `/api/db/*` writes (merged in `api.upsert`).
 - Retrieval scoping enforces strict down-tree container isolation via `X-Jenova-Scope`: non-workspace queries strictly isolate from workspace folders; workspace scopes search descendant projects/folders; project scopes search child folders; folder scopes confine to that folder.
 - HTTP request parsing decodes both chunked transfer encoding and content-length bounded bodies up to `MaxBodyBytes`.
+- Display math fences (`$$...$$` and `\[...\]`) are parsed into `bkMath` blocks, rendered natively via Cairo `DrawingArea` with HarfBuzz font metrics, and fall back to literal source on layout refusal.
 
 ## Known architectural debts
 
-- **The maths engine is not linked into the window.** The parser, layout and font probe
-  are written and asserted, and nothing in `gui.nim` can reach them.
 - **The render memos are conversation-scaled, not viewport-scaled**, now that the
   transcript virtualises.

@@ -27,7 +27,7 @@
 ## stripping and the cache all apply identically — and a bug in that path cannot
 ## show up in one client and not the other. The socket is raw rather than
 ## `std/httpclient` because a localhost request needs no TLS stack.
-import std/[algorithm, atomics, base64, json, net, os, oids, osproc, posix,
+import std/[algorithm, atomics, base64, json, math, net, os, oids, osproc, posix,
             streams,
             strutils, tables, times]
 import owlkettle
@@ -45,6 +45,8 @@ import ./rag
 import ./server
 import ./api
 import ./markdown
+import ./mathtex
+import ./mathfont
 import ./fssync
 import ./sourceview
 import ./nvimctl
@@ -2802,6 +2804,10 @@ proc gtk_scrolled_window_set_policy(sw: GtkWidget, h, v: cint) {.importc, cdecl.
 proc gtk_scrolled_window_set_max_content_height(
   sw: GtkWidget, h: cint) {.importc, cdecl.}
 
+proc cairo_show_text(ctx: CairoContext, text: cstring) {.importc, cdecl.}
+proc cairo_save(ctx: CairoContext) {.importc, cdecl.}
+proc cairo_restore(ctx: CairoContext) {.importc, cdecl.}
+
 const
   ## `GtkPolicyType`. Named rather than passed as bare integers, because
   ## `set_policy(w, 1, 2)` at the call site says nothing about what it does.
@@ -3462,6 +3468,97 @@ const
   ## popover still has the window to sit in.
   CodePreviewPx = (720, 480)
 
+const
+  MathDisplayFontSize = 16.0
+  MathPadX = 12.0
+  MathPadY = 8.0
+
+## Function purpose: parse a hex color into (r, g, b) floats for Cairo drawing.
+proc parseHexColor(s: string): tuple[r, g, b: float] =
+  let clean = if s.startsWith("#"): s[1..^1] else: s
+  if clean.len == 6:
+    try:
+      let v = parseHexInt(clean)
+      result = (float((v shr 16) and 0xFF) / 255.0,
+                float((v shr 8) and 0xFF) / 255.0,
+                float(v and 0xFF) / 255.0)
+    except ValueError:
+      result = (0.94, 0.93, 0.95)
+  else:
+    result = (0.94, 0.93, 0.95)
+
+var
+  activeChosenFont: mathfont.MathFont
+  cachedMathFont: mathtex.MathFont
+  cachedMathFamily: string
+  mathFontInitialized = false
+
+## Function purpose: return cached mathtex.MathFont and font family name for GUI rendering.
+proc getActiveMathLayoutFont(): (mathtex.MathFont, string) =
+  if not mathFontInitialized:
+    var (found, chosen) = mathfont.chooseFont()
+    if found:
+      activeChosenFont = chosen
+      cachedMathFamily = chosen.family
+      cachedMathFont = mathfont.buildMathLayoutFont(activeChosenFont)
+    else:
+      cachedMathFamily = "serif"
+      cachedMathFont = mathfont.buildDefaultMathFont()
+    mathFontInitialized = true
+  (cachedMathFont, cachedMathFamily)
+
+## Function purpose: recursively draw a laid-out MathBox tree onto a Cairo context.
+proc drawMathBox(ctx: CairoContext, b: mathtex.MathBox, ox, oy: float,
+                 fontFam: string, fg: tuple[r, g, b: float]) =
+  let curX = ox + b.x
+  let curY = oy + b.y
+
+  case b.kind
+  of bxRule:
+    ctx.setSource(fg.r, fg.g, fg.b)
+    ctx.rectangle(curX, curY - b.ascent, b.width, b.ascent + b.descent)
+    ctx.fill()
+  of bxGlyph:
+    if b.text.len > 0:
+      ctx.setSource(fg.r, fg.g, fg.b)
+      let totalH = b.ascent + b.descent
+      let scaleY = if b.fontSize > 0.0: totalH / b.fontSize else: 1.0
+      if scaleY > 1.1 or b.stretchTo > 0.0 or b.variant >= 0:
+        cairo_save(ctx)
+        ctx.translate(curX, curY)
+        ctx.scale(1.0, scaleY)
+        ctx.moveTo(0.0, 0.0)
+        ctx.fontSize = b.fontSize
+        ctx.selectFontFace(fontFam,
+                           if b.upright: FontSlantNormal else: FontSlantItalic,
+                           FontWeightNormal)
+        cairo_show_text(ctx, b.text.cstring)
+        cairo_restore(ctx)
+      else:
+        ctx.moveTo(curX, curY)
+        ctx.fontSize = b.fontSize
+        ctx.selectFontFace(fontFam,
+                           if b.upright: FontSlantNormal else: FontSlantItalic,
+                           FontWeightNormal)
+        cairo_show_text(ctx, b.text.cstring)
+  of bxList:
+    for child in b.children:
+      drawMathBox(ctx, child, curX, curY, fontFam, fg)
+
+## Function purpose: paint display math box centered horizontally within the drawing area.
+proc drawMathBoxRoot(ctx: CairoContext, b: mathtex.MathBox, size: (int, int),
+                     fontFam: string) =
+  let
+    w = float(size[0])
+    h = float(size[1])
+  if w <= 0 or h <= 0: return
+
+  let fg = parseHexColor(theme.active().fg)
+  let rootY = MathPadY + b.ascent
+  let rootX = max(MathPadX, (w - b.width) / 2.0)
+
+  drawMathBox(ctx, b, rootX, rootY, fontFam, fg)
+
 ## Function purpose: render one markdown block as a widget. Extracted from
 ## `messageBody` (8c-3) so a note is shown through the transcript's own
 ## renderer — tables, capped code blocks, the copy button and all — instead of
@@ -3514,6 +3611,32 @@ proc mdBlock(app: AppState, b: markdown.Block): Widget =
                 wrap = true
                 style = [StyleClass(
                   if rowIdx == 0: "md-th" else: "md-td")]
+  elif b.kind == bkMath:
+    let (mathFont, fontFam) = getActiveMathLayoutFont()
+    let layoutRes = mathtex.renderMath(b.text, mathFont, MathDisplayFontSize, display = true)
+    if not layoutRes.ok:
+      gui:
+        Frame:
+          style = [StyleClass("code-block")]
+          Box(orient = OrientY, spacing = 4, margin = 8):
+            Label:
+              text = b.text
+              wrap = true
+              xAlign = 0.0
+              style = [StyleClass("msg-body")]
+    else:
+      let
+        box = layoutRes.box
+        reqW = max(24, int(ceil(box.width)) + int(MathPadX * 2.0))
+        reqH = max(24, int(ceil(box.ascent + box.descent)) + int(MathPadY * 2.0))
+      gui:
+        ContentScroll:
+          style = [StyleClass("md-math")]
+          DrawingArea:
+            sizeRequest = (reqW, reqH)
+            proc draw(ctx: CairoContext, size: (int, int)): bool =
+              drawMathBoxRoot(ctx, box, size, fontFam)
+              false
   else:
     gui:
       Frame:

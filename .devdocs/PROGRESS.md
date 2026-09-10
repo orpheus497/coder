@@ -3,6 +3,8 @@
 Milestone ledger. One line per completed, superseded or removed feature or bug.
 Newest first.
 
+- 2026-09-10T00:18Z — M-3: display math rendering pipeline implemented across markdown (bkMath delimiter parsing), mathfont (HarfBuzz font metrics and variant bridge), and gui (Cairo screen drawing and DrawingArea with styled fallback). Gated by 6 new markdown assertions, live font assembly assertions in math-selftest, and gui_check.
+
 - 2026-09-09T23:22Z — Chunk parser hardening in http.nim: validated declared chunk size before body reads, subtracted dataEnd to avoid 64-bit overflow, and pruned consumed bytes from raw after each feed call. Gated by 4 new assertions in routes-selftest (36 total).
 - 2026-09-09T23:13Z — Review fixes applied: AGENTS.md canonical UTC timestamp and approval text cleanup, rag.nim preloaded container scopes and vector scan reordering, gui.nim CRLF sanitization on scopeHeader, and http.nim incremental ChunkParser with decoded payload byte accounting. Gated by 4 new assertions in routes-selftest.
 - 2026-09-09T22:59Z — D9: pure chunked request body parser implemented in http.nim with MaxBodyBytes cap and streaming socket reader in parseRequest. Gated by 9 new assertions in routes-selftest.

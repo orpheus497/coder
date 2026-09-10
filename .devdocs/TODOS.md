@@ -2,7 +2,7 @@
 
 ## Active
 
-*(No active tasks currently scoped in PLANS.md)*
+*(None — all active items executed and verified.)*
 
 ## Backlog
 
@@ -41,8 +41,6 @@
   information detail that is the remainder of 5.1.
 - P-A3 audio capture; P-A7 PDF rasteriser.
 - P-B1 — an error surface carrying the server's own detail.
-- M-3 and M-4 — larger than reported: `mathtex` and `mathfont` are not imported by
-  `gui.nim` and `markdown.BlockKind` has no `bkMath`.
 - Phase 8 batches 3-8, against a comment share that has risen to 32.4%.
 
 ### Report hygiene

@@ -1899,6 +1899,45 @@ proc main() =
               "<i>x</i><span rise='6000' size='smaller'>2</span>",
               (if cells.len == 1: cells[0].rows[0][0] else: $cells.len))
 
+        # Action purpose: display math fences must split into bkMath blocks,
+        # while unclosed streaming fences remain bkText so subsequent tokens flow.
+        let dispSingle = markdown.parse("$$x = 1$$")
+        check("single-line dollar display math becomes bkMath",
+              dispSingle.len == 1 and dispSingle[0].kind == markdown.bkMath and
+              dispSingle[0].text == "x = 1",
+              (if dispSingle.len == 1: $dispSingle[0].kind & " " & dispSingle[0].text else: $dispSingle.len))
+
+        let dispBracket = markdown.parse("\\[x = 1\\]")
+        check("single-line bracket display math becomes bkMath",
+              dispBracket.len == 1 and dispBracket[0].kind == markdown.bkMath and
+              dispBracket[0].text == "x = 1",
+              (if dispBracket.len == 1: $dispBracket[0].kind & " " & dispBracket[0].text else: $dispBracket.len))
+
+        let dispMulti = markdown.parse("$$\\frac{a}{b}\n+ c$$")
+        check("multi-line dollar display math becomes bkMath",
+              dispMulti.len == 1 and dispMulti[0].kind == markdown.bkMath and
+              dispMulti[0].text == "\\frac{a}{b}\n+ c",
+              (if dispMulti.len == 1: dispMulti[0].text else: $dispMulti.len))
+
+        let dispMultiBracket = markdown.parse("\\[\\frac{a}{b}\n+ c\\]")
+        check("multi-line bracket display math becomes bkMath",
+              dispMultiBracket.len == 1 and dispMultiBracket[0].kind == markdown.bkMath and
+              dispMultiBracket[0].text == "\\frac{a}{b}\n+ c",
+              (if dispMultiBracket.len == 1: dispMultiBracket[0].text else: $dispMultiBracket.len))
+
+        let mixed = markdown.parse("before\n$$E = mc^2$$\nafter")
+        check("display math separates surrounding prose into distinct blocks",
+              mixed.len == 3 and mixed[0].kind == markdown.bkText and
+              mixed[1].kind == markdown.bkMath and mixed[1].text == "E = mc^2" and
+              mixed[2].kind == markdown.bkText,
+              $mixed.len)
+
+        let halfOpen = markdown.parse("$$\\frac{a}{b}")
+        check("an unclosed display math fence while streaming remains bkText",
+              halfOpen.len == 1 and halfOpen[0].kind == markdown.bkText and
+              halfOpen[0].text.contains("$$"),
+              (if halfOpen.len == 1: $halfOpen[0].kind & " " & halfOpen[0].text else: $halfOpen.len))
+
       if bad == 0:
         echo ""
         echo "markdown-selftest: PASS"
@@ -2526,6 +2565,21 @@ proc main() =
         check("a displayed radical is taller than the same one inline",
               dispR.box.ascent > inlineR.box.ascent,
               $dispR.box.ascent & " vs " & $inlineR.box.ascent)
+
+        # Action purpose: verify that buildMathLayoutFont and chooseFont assemble
+        # functional measure and variant closures without manual test mocks.
+        block liveFontAssemblyLaysOut:
+          var (found, chosen) = mathfont.chooseFont()
+          defer:
+            if found: chosen.close()
+          let layoutFont = if found: mathfont.buildMathLayoutFont(chosen)
+                           else: mathfont.buildDefaultMathFont()
+          let liveLaid = mathtex.renderMath("\\frac{x^2 + 1}{\\sqrt{y}}", layoutFont, Size, true)
+          check("buildMathLayoutFont assembles a layout font that lays out successfully",
+                liveLaid.ok, "renderMath refused live font layout")
+          check("live font layout box has non-zero width and height",
+                liveLaid.box.width > 0.0 and liveLaid.box.ascent > 0.0,
+                $liveLaid.box.width & " x " & $liveLaid.box.ascent)
 
       if bad == 0:
         echo ""

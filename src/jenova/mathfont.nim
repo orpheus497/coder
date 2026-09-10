@@ -149,6 +149,7 @@ proc hb_font_destroy(f: HbFont)
 proc hb_font_set_scale(f: HbFont, xScale, yScale: cint)
 proc hb_font_get_nominal_glyph(f: HbFont, unicode: HbCodepoint,
                                glyph: var HbCodepoint): HbBool
+proc hb_font_get_glyph_h_advance(f: HbFont, glyph: HbCodepoint): HbPosition
 proc hb_ot_math_has_data(f: HbFace): HbBool
 proc hb_ot_math_get_constant(f: HbFont, c: cint): HbPosition
 proc hb_ot_math_get_glyph_italics_correction(f: HbFont,
@@ -158,6 +159,11 @@ proc hb_ot_math_get_glyph_variants(f: HbFont, g: HbCodepoint, dir: cint,
                                    variantsCount: ptr cuint,
                                    variants: pointer): cuint
 {.pop.}
+
+type
+  HbGlyphVariant {.bycopy.} = object
+    glyph: HbCodepoint
+    advance: HbPosition
 
 type
   ## An open maths font, and the one thing a caller may ask that is not a
@@ -390,6 +396,8 @@ const FontCandidates* = [
   ("Latin Modern Math", "latinmodern-math.otf"),
   ("STIX Two Math", "STIXTwoMath-Regular.otf"),
   ("STIX Math", "STIXMath-Regular.otf"),
+  ("DejaVu Math TeX Gyre", "DejaVuMathTeXGyre.ttf"),
+  ("TeX Gyre DejaVu Math", "DejaVuMathTeXGyre.ttf"),
   ("TeX Gyre Pagella Math", "texgyrepagella-math.otf"),
   ("TeX Gyre Termes Math", "texgyretermes-math.otf"),
   ("GNU FreeSerif", "FreeSerif.ttf"),
@@ -579,3 +587,105 @@ proc unavailableReason*(): string =
     " under " & FontRoots.join(", ") &
     ". Set JENOVA_MATH_FONT to a font file with an OpenType MATH table, " &
     "or install one. Formulae render as their own source until then."
+
+proc decodeRunes(s: string): seq[int] =
+  var i = 0
+  while i < s.len:
+    let c = uint8(s[i])
+    var cp: int = 0
+    var need = 0
+    if (c and 0x80'u8) == 0:
+      cp = int(c)
+      need = 0
+    elif (c and 0xE0'u8) == 0xC0'u8:
+      cp = int(c and 0x1F'u8)
+      need = 1
+    elif (c and 0xF0'u8) == 0xE0'u8:
+      cp = int(c and 0x0F'u8)
+      need = 2
+    elif (c and 0xF8'u8) == 0xF0'u8:
+      cp = int(c and 0x07'u8)
+      need = 3
+    else:
+      inc i
+      continue
+    inc i
+    while need > 0 and i < s.len:
+      let b = uint8(s[i])
+      if (b and 0xC0'u8) != 0x80'u8: break
+      cp = (cp shl 6) or int(b and 0x3F'u8)
+      dec need
+      inc i
+    result.add cp
+
+## Function purpose: assemble a mathtex.MathFont backed by the opened font file.
+proc buildMathLayoutFont*(f: var MathFont): mathtex.MathFont =
+  let constants = if f.usable: f.readConstants() else: defaultConstants()
+  let fontHandle = f.font
+
+  let measure = proc (text: string, size: float, upright: bool): mathtex.GlyphBox =
+    var totalAdvance: float = 0.0
+    var hasAdv = false
+    let runes = decodeRunes(text)
+    if not pointer(fontHandle).isNil:
+      for cp in runes:
+        var g: HbCodepoint
+        if hb_font_get_nominal_glyph(fontHandle, HbCodepoint(cp), g) != 0:
+          let adv = hb_font_get_glyph_h_advance(fontHandle, g)
+          if adv > 0:
+            totalAdvance += float(adv) / float(UnitsPerEm) * size
+            hasAdv = true
+          else:
+            totalAdvance += 0.55 * size
+        else:
+          totalAdvance += 0.55 * size
+    if not hasAdv or totalAdvance <= 0.0:
+      totalAdvance = float(max(1, runes.len)) * 0.55 * size
+
+    mathtex.GlyphBox(
+      width: totalAdvance,
+      ascent: 0.75 * size,
+      descent: 0.25 * size,
+      italicCorrection: (if upright: 0.0 else: 0.08 * size)
+    )
+
+  let variants = proc (text: string, size: float): seq[mathtex.MathVariant] =
+    const StretchyChars = ["(", ")", "[", "]", "{", "}", "√", "∑", "∫", "∥", "∣", "|"]
+    if text notin StretchyChars: return @[]
+    let runes = decodeRunes(text)
+    if not pointer(fontHandle).isNil and runes.len > 0:
+      let firstCp = runes[0]
+      var g: HbCodepoint
+      if hb_font_get_nominal_glyph(fontHandle, HbCodepoint(firstCp), g) != 0:
+        var count: cuint = 0
+        discard hb_ot_math_get_glyph_variants(fontHandle, g, HbDirectionTtb, 0, addr count, nil)
+        if count > 0:
+          var vBuf = newSeq[HbGlyphVariant](count)
+          discard hb_ot_math_get_glyph_variants(fontHandle, g, HbDirectionTtb, 0, addr count, addr vBuf[0])
+          for v in vBuf:
+            let adv = float(v.advance) / float(UnitsPerEm) * size
+            let itCorr = float(hb_ot_math_get_glyph_italics_correction(fontHandle, v.glyph)) / float(UnitsPerEm) * size
+            result.add mathtex.MathVariant(
+              width: 0.55 * size,
+              ascent: 0.8 * adv,
+              descent: 0.2 * adv,
+              italicCorrection: itCorr
+            )
+          if result.len > 0: return result
+
+    const StretchFactors = [1.0, 1.5, 2.0, 3.0]
+    for factor in StretchFactors:
+      let ext = factor * size
+      result.add mathtex.MathVariant(
+        width: 0.55 * size,
+        ascent: 0.8 * ext,
+        descent: 0.2 * ext,
+        italicCorrection: (if text in ["∑", "∫"]: 0.05 * ext else: 0.0)
+      )
+
+  mathtex.MathFont(constants: constants, measure: measure, variants: variants)
+
+## Function purpose: assemble a fallback mathtex.MathFont using Latin Modern default constants.
+proc buildDefaultMathFont*(): mathtex.MathFont =
+  var dummy = MathFont()
+  buildMathLayoutFont(dummy)

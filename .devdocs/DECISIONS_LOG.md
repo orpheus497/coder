@@ -4,6 +4,15 @@ Architectural and structural decisions, and ambiguities resolved. Newest first.
 
 ---
 
+## 2026-09-09T23:55Z — rulings on M-3 (display math rendering: delimiter parsing, font metrics, and fallback strategy)
+
+Three open design questions resolved by USER ruling for M-3 display math rendering:
+
+1. **Task selection:** Progress M-3 display math rendering into the product, connecting `markdown.parse` to `mathtex` and Cairo rendering in `gui.nim`.
+2. **Fallback strategy:** If a formula fails to parse or lay out (or if no usable OpenType MATH font is available), the GUI falls back gracefully to displaying the raw LaTeX source in a clean, readable text container, ensuring the transcript never crashes or displays blank blocks.
+3. **Font metrics & layout:** `mathfont` and Pango/Cairo font metrics provide character widths and stretchy delimiter variant bounds to `mathtex.MathFont`, with `FontCandidates` recognizing installed math fonts (`DejaVuMathTeXGyre.ttf`, `FreeSerif.ttf`, `latinmodern-math.otf`, etc.).
+
+
 ## 2026-09-09T22:35Z — rulings on D5 (retrieval scoping hierarchy), D6 (partial-node merge), and V-17 (citation policy)
 
 Three open design decisions resolved by USER ruling:

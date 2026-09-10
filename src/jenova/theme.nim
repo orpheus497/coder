@@ -275,6 +275,12 @@ list > row:selected {
   border: none;
   background: transparent;
 }
+/* Display math container. Transparent ground and clean breathing room. */
+.md-math {
+  border: none;
+  background: transparent;
+  padding: 4px 0px;
+}
 /* Step 13a, the composer. `min-height` is a **floor**, which is the one thing a
    sizing API is good for and exactly what is wanted here — the ceiling is
    `ContentScroll.maxHeight`, a different mechanism that does not conflict with

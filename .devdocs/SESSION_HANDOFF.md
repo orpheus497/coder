@@ -2,6 +2,65 @@
 
 Newest entry at the top.
 
+## 2026-09-10T00:18Z — M-3 display math rendering: markdown delimiter parsing, HarfBuzz font metrics bridge, and Cairo screen drawing
+
+### What happened
+
+Implemented the full display math rendering pipeline (M-3) across the markdown parser, font metrics engine, and desktop GUI:
+1. **Markdown Parsing (`src/jenova/markdown.nim`):**
+   - Added `bkMath` to `BlockKind` enum (`bkText, bkCode, bkTable, bkMath`).
+   - Implemented single-line and multi-line delimiter parsing for both dollar fences (`$$...$$`) and bracket fences (`\[...\]`).
+   - Preserved half-open fences as `bkText` during token streaming so downstream generation is never swallowed or corrupted before closing delimiters arrive.
+   - Gated with 6 unit assertions in `markdown-selftest` in `src/jenova_core.nim`.
+2. **Font Metrics Bridge (`src/jenova/mathfont.nim`):**
+   - Added `hb_font_get_glyph_h_advance` FFI binding for HarfBuzz.
+   - Added installed `("DejaVu Math TeX Gyre", "DejaVuMathTeXGyre.ttf")` to `FontCandidates`.
+   - Implemented `buildMathLayoutFont` and `buildDefaultMathFont` providing real `measure` (run advance and bounding boxes) and `variants` (stretchy delimiters and HarfBuzz OpenType MATH table glyph variants) closures to `mathtex.MathFont`.
+   - Gated with live font assembly and layout assertions in `math-selftest` in `src/jenova_core.nim`.
+3. **GUI & Cairo Screen Drawing (`src/jenova/gui.nim`, `src/jenova/theme.nim`):**
+   - Bound Cairo text and state management FFI (`cairo_show_text`, `cairo_save`, `cairo_restore`).
+   - Implemented cached math layout font retrieval, preventing font file re-discovery on repeated renders.
+   - Implemented recursive `drawMathBox` rendering `bxRule` (axis fraction rules, radical overbars) via filled Cairo rectangles and `bxGlyph` via font-face glyph rendering with vertical scaling for variants.
+   - Implemented `drawMathBoxRoot` with theme-adaptive foreground color resolution (`parseHexColor`), natural padding, and horizontal centering.
+   - Wired `bkMath` rendering into `mdBlock`, wrapping the Cairo `DrawingArea` in `ContentScroll` for horizontal scrolling and providing a fallback container displaying literal source LaTeX if parsing or layout fails.
+   - Added `.md-math` CSS rule in `theme.nim`.
+4. **Validation & Regression:**
+   - Both `bin/jenova-core` and `bin/jenova` compiled cleanly with zero hints or warnings.
+   - `tests/gui_check.sh` passed.
+   - `bin/jenova --check` initialized GTK and verified the complete window tree without errors.
+   - All 21 socket-free self-tests (`db`, `sha256`, `markdown`, `error`, `tree`, `attach`, `workspace`, `nvim-env`, `models`, `fs`, `hardware`, `composer`, `convmd`, `asset`, `lifecycle`, `relay`, `inspect`, `math`, `pipeline`, `rag`, `routes`) passed cleanly.
+
+### Files touched
+
+- `src/jenova/markdown.nim`
+- `src/jenova/mathfont.nim`
+- `src/jenova/theme.nim`
+- `src/jenova/gui.nim`
+- `src/jenova_core.nim`
+- `.devdocs/DECISIONS_LOG.md`
+- `.devdocs/TODOS.md`
+- `.devdocs/PLANS.md`
+- `.devdocs/PROGRESS.md`
+- `.devdocs/BRIEFING.md`
+- `.devdocs/SESSION_HANDOFF.md`
+- `.devdocs/SUMMARIES.md`
+
+### Decisions
+
+- Display math fences (`$$...$$` and `\[...\]`) parse into standalone `bkMath` blocks, while unclosed streaming fences remain `bkText`.
+- Font metrics and stretchy delimiter variants are supplied to `mathtex.MathFont` via HarfBuzz and Pango/Cairo metrics without hardcoded test mocks.
+- Display math layout failures fall back gracefully to a styled text container showing literal LaTeX source rather than crashing or blanking.
+
+### Next steps
+
+1. Phase 2.2: reduce the three render memos (`BlockMemo`, `ParseMemo`, `thumbCache`) to viewport scale rather than conversation scale.
+2. Concurrency design for retrieval layer: address the two deferred races from report 03 (`forgetMessage` against restore-and-update indexing, and descendant discovery against fork creation).
+3. Phase 4.3: implement the command palette in the desktop GUI.
+4. Reachable hardware & platform integrations: FreeBSD `sysctl` probe, `fork`/`setsid`/`execv` path, D-Bus tray against real watcher.
+5. Capture `png/gui-*.png` screenshots to unblock README reordering.
+
+---
+
 ## 2026-09-09T23:22Z — chunk parser hardening: early size validation, overflow protection, and buffer pruning
 
 ### What happened

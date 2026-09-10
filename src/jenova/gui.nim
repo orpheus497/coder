@@ -2308,6 +2308,19 @@ var thumbCache: Table[string, Pixbuf]
 ## Insertion order, so the oldest decoded thumbnails can be dropped.
 var thumbOrder: seq[string]
 
+## The laid-out form of each display formula, keyed by its source. Filled by
+## `mathLayoutFor`, which is where the reasoning lives; declared here because
+## `clearRenderMemos` below is what empties it.
+var mathLayoutCache: Table[string, ref mathtex.MathLayout]
+## Insertion order, so the oldest layouts can be dropped. Same shape as
+## `thumbOrder`, and bounded for the same reason.
+var mathLayoutOrder: seq[string]
+
+const MathLayoutCacheCap = 64
+  ## Far more displayed formulae than a transcript shows at once, so the cap
+  ## does not engage while reading; `clearRenderMemos` is what recovers the
+  ## memory on a conversation switch.
+
 const ThumbCacheCap = 64
   ## How many decoded thumbnails may be held.
   ##
@@ -2404,6 +2417,12 @@ proc clearRenderMemos() =
   attachMemo.clear()
   thumbCache.clear()
   thumbOrder.setLen(0)
+  # The chosen font deliberately survives: it is a property of the machine
+  # rather than of the conversation, and re-walking five system font trees on
+  # every conversation switch is exactly the cost `mathFontInitialized` exists
+  # to pay once. Only the laid-out formulae go.
+  mathLayoutCache.clear()
+  mathLayoutOrder.setLen(0)
 
 ## Function purpose: one call for every per-message cache, so a message edited
 ## or deleted cannot stay rendered from a stale parse in one of them.
@@ -3491,21 +3510,61 @@ var
   activeChosenFont: mathfont.MathFont
   cachedMathFont: mathtex.MathFont
   cachedMathFamily: string
+  ## Whether `chooseFont` found a face that passed all three of its questions.
+  ## **The caller must render source text when this is false.** The previous
+  ## form fell back to `buildDefaultMathFont` and drew anyway, which is the one
+  ## thing `mathfont`'s header says not to do: that font has no handles, so
+  ## every advance is a flat 0.55 em guess and every delimiter is a synthetic
+  ## stretch, drawn in whatever "serif" resolves to. The result is a formula
+  ## that looks laid out and is not — and a formula drawn badly is worse than
+  ## one drawn plainly, because only one of the two tells the reader to
+  ## distrust it.
+  mathFontAvailable = false
   mathFontInitialized = false
+  ## The reason has one audience and one showing. Without the flag it would be
+  ## re-enqueued for every displayed formula in the transcript, on every redraw.
+  mathFontNoticed = false
 
-## Function purpose: return cached mathtex.MathFont and font family name for GUI rendering.
-proc getActiveMathLayoutFont(): (mathtex.MathFont, string) =
+## Function purpose: return the cached mathtex.MathFont, the family name to
+## draw it in, and whether there is a usable font at all.
+proc getActiveMathLayoutFont(): (mathtex.MathFont, string, bool) =
   if not mathFontInitialized:
     var (found, chosen) = mathfont.chooseFont()
     if found:
       activeChosenFont = chosen
       cachedMathFamily = chosen.family
       cachedMathFont = mathfont.buildMathLayoutFont(activeChosenFont)
-    else:
-      cachedMathFamily = "serif"
-      cachedMathFont = mathfont.buildDefaultMathFont()
+    mathFontAvailable = found
     mathFontInitialized = true
-  (cachedMathFont, cachedMathFamily)
+  (cachedMathFont, cachedMathFamily, mathFontAvailable)
+
+## Function purpose: the laid-out form of one display formula, memoised.
+##
+## `renderMath` parses the source and runs Appendix G over it. `mdBlock` is on
+## the render path, so without this that ran once per displayed formula per
+## redraw — and with `timings_per_token` the transcript redraws several times a
+## second while a reply streams, over every formula already on screen.
+##
+## Keyed on the source alone because the other two inputs cannot vary: the font
+## is chosen once per process and `MathDisplayFontSize` is a constant. A `ref`
+## rather than a value so a hit hands back the box tree instead of deep-copying
+## `MathBox.children` on every frame. The table itself is declared beside the
+## other render memos, above the `clearRenderMemos` that empties it.
+proc mathLayoutFor(src: string, font: mathtex.MathFont): ref mathtex.MathLayout =
+  if mathLayoutCache.hasKey(src): return mathLayoutCache[src]
+  new(result)
+  result[] = mathtex.renderMath(src, font, MathDisplayFontSize, display = true)
+  # A refusal is cached too. It is deterministic in the source, and re-parsing
+  # a formula the parser has already rejected is the same wasted work as
+  # re-laying out one it accepted.
+  mathLayoutOrder.add src
+  # Batch eviction, for the reason `markdown.evict` gives: this runs from
+  # `view`, where a per-insert `delete(0)` is an O(n) shift.
+  if mathLayoutOrder.len > MathLayoutCacheCap:
+    let drop = max(1, MathLayoutCacheCap div 4)
+    for i in 0 ..< drop: mathLayoutCache.del(mathLayoutOrder[i])
+    mathLayoutOrder = mathLayoutOrder[drop .. ^1]
+  mathLayoutCache[src] = result
 
 ## Function purpose: recursively draw a laid-out MathBox tree onto a Cairo context.
 proc drawMathBox(ctx: CairoContext, b: mathtex.MathBox, ox, oy: float,
@@ -3612,9 +3671,22 @@ proc mdBlock(app: AppState, b: markdown.Block): Widget =
                 style = [StyleClass(
                   if rowIdx == 0: "md-th" else: "md-td")]
   elif b.kind == bkMath:
-    let (mathFont, fontFam) = getActiveMathLayoutFont()
-    let layoutRes = mathtex.renderMath(b.text, mathFont, MathDisplayFontSize, display = true)
-    if not layoutRes.ok:
+    # Not `mathFont`: Nim folds case and underscores, so a local of that name
+    # is the same identifier as the `mathfont` module and shadows every
+    # qualified call to it in this branch.
+    let (layoutFont, fontFam, haveFont) = getActiveMathLayoutFont()
+    # Nothing is laid out and nothing is drawn without a font. The source-text
+    # path below is the whole of the no-font behaviour, which is what
+    # `mathfont.unavailableReason` promises the user: "formulae render as their
+    # own source until then."
+    let layoutRes = if haveFont: mathLayoutFor(b.text, layoutFont) else: nil
+    if layoutRes.isNil or not layoutRes.ok:
+      if not haveFont and not mathFontNoticed:
+        # Once per process, and it names the files and the directories rather
+        # than saying maths is unavailable — the same argument the Models
+        # panel's empty state makes about naming what it searched.
+        mathFontNoticed = true
+        app.notice = mathfont.unavailableReason()
       gui:
         Frame:
           style = [StyleClass("code-block")]
@@ -3626,16 +3698,19 @@ proc mdBlock(app: AppState, b: markdown.Block): Widget =
               style = [StyleClass("msg-body")]
     else:
       let
-        box = layoutRes.box
-        reqW = max(24, int(ceil(box.width)) + int(MathPadX * 2.0))
-        reqH = max(24, int(ceil(box.ascent + box.descent)) + int(MathPadY * 2.0))
+        reqW = max(24, int(ceil(layoutRes.box.width)) + int(MathPadX * 2.0))
+        reqH = max(24, int(ceil(layoutRes.box.ascent + layoutRes.box.descent)) +
+                      int(MathPadY * 2.0))
       gui:
         ContentScroll:
           style = [StyleClass("md-math")]
           DrawingArea:
             sizeRequest = (reqW, reqH)
             proc draw(ctx: CairoContext, size: (int, int)): bool =
-              drawMathBoxRoot(ctx, box, size, fontFam)
+              # The `ref` is captured, not the box: capturing `box` would deep
+              # copy the tree into the closure for every formula on every
+              # rebuild, which is the cost the memo above is for.
+              drawMathBoxRoot(ctx, layoutRes.box, size, fontFam)
               false
   else:
     gui:

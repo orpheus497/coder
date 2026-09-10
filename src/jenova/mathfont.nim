@@ -397,7 +397,6 @@ const FontCandidates* = [
   ("STIX Two Math", "STIXTwoMath-Regular.otf"),
   ("STIX Math", "STIXMath-Regular.otf"),
   ("DejaVu Math TeX Gyre", "DejaVuMathTeXGyre.ttf"),
-  ("TeX Gyre DejaVu Math", "DejaVuMathTeXGyre.ttf"),
   ("TeX Gyre Pagella Math", "texgyrepagella-math.otf"),
   ("TeX Gyre Termes Math", "texgyretermes-math.otf"),
   ("GNU FreeSerif", "FreeSerif.ttf"),
@@ -657,11 +656,19 @@ proc buildMathLayoutFont*(f: var MathFont): mathtex.MathFont =
       let firstCp = runes[0]
       var g: HbCodepoint
       if hb_font_get_nominal_glyph(fontHandle, HbCodepoint(firstCp), g) != 0:
+        # Action purpose: the same IN/OUT contract `verticalVariantCount` documents.
+        # A zero-capacity call leaves `count` at the number *written*, which is
+        # zero by construction — so reading the total out of it took this branch
+        # to `if 0 > 0` on every font and the synthetic fallback below ran even
+        # for a face carrying eight real sizes. The total is the return value;
+        # `count` is only ever how many the second call actually filled in.
         var count: cuint = 0
-        discard hb_ot_math_get_glyph_variants(fontHandle, g, HbDirectionTtb, 0, addr count, nil)
-        if count > 0:
-          var vBuf = newSeq[HbGlyphVariant](count)
+        let total = hb_ot_math_get_glyph_variants(fontHandle, g, HbDirectionTtb, 0, addr count, nil)
+        if total > 0:
+          var vBuf = newSeq[HbGlyphVariant](total)
+          count = total
           discard hb_ot_math_get_glyph_variants(fontHandle, g, HbDirectionTtb, 0, addr count, addr vBuf[0])
+          vBuf.setLen(int(count))
           for v in vBuf:
             let adv = float(v.advance) / float(UnitsPerEm) * size
             let itCorr = float(hb_ot_math_get_glyph_italics_correction(fontHandle, v.glyph)) / float(UnitsPerEm) * size

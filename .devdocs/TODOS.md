@@ -17,12 +17,9 @@
   themselves — `forgetMessage` against restore-and-update indexing, and descendant discovery
   against fork creation — still need the per-message lock or deletion generation that report
   03 describes, and that is a concurrency design for the retrieval layer rather than a patch.
-- **`serve-selftest` and the six shell suites have not been run** since the
-  changes of 2026-09-09. They bind listeners and the session was instructed not to run the
-  server. `relay-selftest` does not bind a socket (it tests pure string header splicing in memory)
-  and can run socket-free. Nothing depends on the listener suites for the fixes made —
-  `routes-selftest` covers the routing change without a socket — but the suite is not fully
-  green until they are run.
+- **The mapped-window tier has never been run.** `Xvfb`, `xdotool` and `xclip` are absent
+  from this host, so `gui_build.sh` runs only its build-only tier. Every other suite —
+  the self-tests, the six shell suites and `gui_check.sh` — is green.
 
 ### Reachable now that the target host is the working host
 

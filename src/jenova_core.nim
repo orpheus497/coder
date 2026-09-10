@@ -1938,6 +1938,30 @@ proc main() =
               halfOpen[0].text.contains("$$"),
               (if halfOpen.len == 1: $halfOpen[0].kind & " " & halfOpen[0].text else: $halfOpen.len))
 
+        # Action purpose: an empty fence is text. Worth asserting because the
+        # alternative is silent: a consumed fence, no block, and a line that
+        # leaves the message with no trace anywhere that it was there.
+        let emptyDollar = markdown.parse("$$$$")
+        check("an empty dollar display fence stays text rather than vanishing",
+              emptyDollar.len == 1 and emptyDollar[0].kind == markdown.bkText and
+              emptyDollar[0].text.contains("$$"),
+              (if emptyDollar.len == 1: $emptyDollar[0].kind & " " & emptyDollar[0].text
+               else: $emptyDollar.len))
+
+        let emptyBracket = markdown.parse("\\[\\]")
+        check("an empty bracket display fence stays text rather than vanishing",
+              emptyBracket.len == 1 and emptyBracket[0].kind == markdown.bkText and
+              emptyBracket[0].text.len > 0,
+              (if emptyBracket.len == 1: $emptyBracket[0].kind & " " & emptyBracket[0].text
+               else: $emptyBracket.len))
+
+        let emptyPair = markdown.parse("before\n$$\n$$\nafter")
+        check("an empty multi-line fence keeps its lines and its prose",
+              emptyPair.len >= 1 and emptyPair[0].kind == markdown.bkText and
+              emptyPair[0].text.contains("before") and
+              emptyPair[^1].text.contains("after"),
+              $emptyPair.len)
+
       if bad == 0:
         echo ""
         echo "markdown-selftest: PASS"

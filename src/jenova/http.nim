@@ -3,7 +3,7 @@
 ## every connection has its own pool thread, so a stall here costs one
 ## connection and never the server.
 
-import std/[net, strutils, tables, os]
+import std/[net, nativesockets, strutils, tables, times, os]
 
 type
   Request* = object
@@ -35,6 +35,16 @@ const
   ## lies cannot hold a worker thread for ever.
   MaxDrainBytes = 96 * 1024 * 1024
 
+  ## The ceiling on a drain, whatever the peer does. The socket's own receive
+  ## timeout is per `recv`, so a peer trickling a byte per wait satisfies it
+  ## indefinitely and the cap above never ends the loop.
+  DrainDeadlineSec = 5.0
+
+  ## How long a silent peer is waited on before a refusal is written. Chunked
+  ## framing carries no length, so quiet is the only end signal short of the
+  ## socket's thirty-second receive timeout.
+  DrainQuietMs = 250
+
 ## Function purpose: framing is done on the raw buffer because `recvLine` cannot
 ## distinguish the blank separator line from a closed connection. Body bytes
 ## that arrived in the same read are returned rather than dropped.
@@ -54,6 +64,25 @@ proc readHead(sock: Socket): (string, string) =
   if data.len == 0:
     raise newException(HttpError, "connection closed before request")
   raise newException(HttpError, "malformed request: no header terminator")
+
+## Function purpose: discards what the peer is still sending, so a refusal
+## reaches it as a response rather than as a reset.
+##
+## Action purpose: bounded three ways — the byte target, the deadline, and a
+## peer that goes quiet. `stopWhenQuiet` is for framing that carries no length;
+## where the length is known the count is the end and a pause is a slow sender.
+proc drainBody(sock: Socket, already, target: int, stopWhenQuiet = false) =
+  var drained = already
+  let deadline = epochTime() + DrainDeadlineSec
+  var sink = newString(4096)
+  while drained < target and epochTime() < deadline:
+    if stopWhenQuiet:
+      var fds = @[sock.getFd]
+      if selectRead(fds, DrainQuietMs) <= 0: break
+    let want = min(sink.len, target - drained)
+    let n = sock.recv(addr sink[0], want)
+    if n <= 0: break
+    drained += n
 
 type
   ChunkParser* = object
@@ -148,7 +177,23 @@ proc parseRequest*(sock: Socket): Request =
     if c > 0:
       result.headers[line[0 ..< c].strip.toLowerAscii] = line[c + 1 .. ^1].strip
 
-  let isChunked = result.headers.getOrDefault("transfer-encoding", "").toLowerAscii.contains("chunked")
+  # Action purpose: the codings are the comma-separated list they are spelled
+  # as, and only the one this server decodes is accepted — `gzip, chunked` and
+  # `chunked, gzip` frame their bodies in a layer it does not have, which is the
+  # shape a smuggled request takes. `identity` is a no-op, so it is dropped.
+  var codings: seq[string]
+  for tok in result.headers.getOrDefault("transfer-encoding", "").split(','):
+    let t = tok.strip.toLowerAscii
+    if t.len == 0 or t == "identity": continue
+    codings.add t
+  if codings.len > 1 or (codings.len == 1 and codings[0] != "chunked"):
+    # The sender is mid-body when this is decided, and a close on it replaces
+    # the response with a reset.
+    drainBody(sock, leftover.len, MaxDrainBytes, stopWhenQuiet = true)
+    raise newException(HttpError,
+      "unsupported transfer-encoding: " &
+      result.headers.getOrDefault("transfer-encoding", ""))
+  let isChunked = codings.len == 1
   if isChunked:
     var parser = ChunkParser()
     var raw = leftover
@@ -163,6 +208,11 @@ proc parseRequest*(sock: Socket): Request =
       let n = sock.recv(addr buf[0], buf.len)
       if n <= 0: break
       raw.add buf[0 ..< n]
+    # Action purpose: both refusals drain first, for the reason the
+    # `Content-Length` path below gives. The parser stops at the first chunk
+    # header it refuses, so the sender is still writing when it does.
+    if parser.tooLarge or parser.error or not parser.done:
+      drainBody(sock, raw.len, MaxDrainBytes, stopWhenQuiet = true)
     if parser.tooLarge:
       raise newException(BodyTooLargeError, "chunked request body exceeded limit")
     if not parser.done or parser.error:
@@ -180,13 +230,8 @@ proc parseRequest*(sock: Socket): Request =
       #
       # Discarded as it arrives rather than accumulated: the cap exists to keep
       # this body out of memory, and buffering it to drain it would defeat that.
-      var drained = leftover.len
-      var sink = newString(4096)
-      while drained < clen and drained < MaxDrainBytes:
-        let want = min(sink.len, min(clen, MaxDrainBytes) - drained)
-        let n = sock.recv(addr sink[0], want)
-        if n <= 0: break
-        drained += n
+      # The count is known here, so the drain ends at it rather than on a pause.
+      drainBody(sock, leftover.len, min(clen, MaxDrainBytes))
 
       # Action purpose: both numbers are in the message because this is a failure
       # the user can act on, and the margin decides whether they drop an

@@ -239,10 +239,23 @@ proc contextFor*(folderId, projectId, workspaceId: string,
     spent += n
     true
 
+  ## Function purpose: whether the budget can still admit anything at all, so
+  ## the remainder is counted without a `SELECT content` and a body per row.
+  ##
+  ## Action purpose: **the read is the cost, not the accumulation** — this runs
+  ## on the window's own thread on every send. Not "the next entry does not
+  ## fit": a smaller row further down still fits a partly spent budget.
+  proc exhausted(): bool = spent >= maxBytes
+
   if targetFocus.len > 0:
     var any = false
     var block1 = "--- FOCUS / RULES ---\n"
     for n in targetFocus:
+      # Counted, not read: an empty focus note is counted here rather than read
+      # to discover it contributes nothing, which is the cost being refused.
+      if exhausted():
+        inc omitted
+        continue
       # An empty focus note contributes nothing rather than a bare heading.
       let body = noteBody(n.id)
       if body.strip.len == 0: continue
@@ -256,6 +269,9 @@ proc contextFor*(folderId, projectId, workspaceId: string,
     var any = false
     var block2 = "--- NOTES ---\n"
     for n in targetNotes:
+      if exhausted():
+        inc omitted
+        continue
       let entry = "Title: " & n.title & "\nContent: " & noteBody(n.id) & "\n\n"
       if not room(entry.len): continue
       any = true
@@ -266,6 +282,9 @@ proc contextFor*(folderId, projectId, workspaceId: string,
     var any = false
     var block3 = "--- FILES ---\n"
     for f in targetFiles:
+      if exhausted():
+        inc omitted
+        continue
       let body = fileBody(f.id)
       var entry = "File: " & f.name & " (Type: " & f.kind & ")\n"
       if body.len > 0:

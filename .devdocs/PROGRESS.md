@@ -3,6 +3,12 @@
 Milestone ledger. One line per completed, superseded or removed feature or bug.
 Newest first.
 
+- 2026-09-10T02:59Z — Full suite run on this host: twenty-two self-tests, the six shell suites and `gui_check.sh` all pass. Only the mapped-window tier remains unrun, for want of `Xvfb`, `xdotool` and `xclip`.
+
+- 2026-09-10T02:59Z — Review round on PR #118 answered: empty display-math fences kept as text in markdown, glyph resolution separated from advance width in mathfont so a zero-advance combining mark is not padded, workspace context stops reading bodies once the budget is spent, and chunked and unsupported-transfer-encoding refusals drain the peer under a byte cap, a total deadline and a quiet-peer stop before answering. Gated by 3 new markdown assertions and a live 413-under-send check; full self-test set, six shell suites, `serve-selftest` and `gui_check` green.
+
+- 2026-09-10T02:41Z — Message role for chat indexing resolved from the merged row rather than the posted node, so a partial assistant edit re-indexes; maths font resolved once at startup instead of on the render path, with the unavailability reason rendered beside the formula rather than written to the notice line from `view`; `transfer-encoding` parsed as coding tokens with only `chunked` accepted.
+
 - 2026-09-10T00:18Z — M-3: display math rendering pipeline implemented across markdown (bkMath delimiter parsing), mathfont (HarfBuzz font metrics and variant bridge), and gui (Cairo screen drawing and DrawingArea with styled fallback). Gated by 6 new markdown assertions, live font assembly assertions in math-selftest, and gui_check.
 
 - 2026-09-09T23:22Z — Chunk parser hardening in http.nim: validated declared chunk size before body reads, subtracted dataEnd to avoid 64-bit overflow, and pruned consumed bytes from raw after each feed call. Gated by 4 new assertions in routes-selftest (36 total).

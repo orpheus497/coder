@@ -624,21 +624,21 @@ proc buildMathLayoutFont*(f: var MathFont): mathtex.MathFont =
 
   let measure = proc (text: string, size: float, upright: bool): mathtex.GlyphBox =
     var totalAdvance: float = 0.0
-    var hasAdv = false
+    ## Whether the font answered for a rune — resolution, not width. A zero
+    ## advance is a metric a font gives: a combining mark occupies no width of
+    ## its own. The fallback below is for a glyph the font does not have.
+    var resolved = false
     let runes = decodeRunes(text)
     if not pointer(fontHandle).isNil:
       for cp in runes:
         var g: HbCodepoint
         if hb_font_get_nominal_glyph(fontHandle, HbCodepoint(cp), g) != 0:
-          let adv = hb_font_get_glyph_h_advance(fontHandle, g)
-          if adv > 0:
-            totalAdvance += float(adv) / float(UnitsPerEm) * size
-            hasAdv = true
-          else:
-            totalAdvance += 0.55 * size
+          totalAdvance += float(hb_font_get_glyph_h_advance(fontHandle, g)) /
+                          float(UnitsPerEm) * size
+          resolved = true
         else:
           totalAdvance += 0.55 * size
-    if not hasAdv or totalAdvance <= 0.0:
+    if not resolved:
       totalAdvance = float(max(1, runes.len)) * 0.55 * size
 
     mathtex.GlyphBox(

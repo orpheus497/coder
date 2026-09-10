@@ -3521,21 +3521,27 @@ var
   ## distrust it.
   mathFontAvailable = false
   mathFontInitialized = false
-  ## The reason has one audience and one showing. Without the flag it would be
-  ## re-enqueued for every displayed formula in the transcript, on every redraw.
-  mathFontNoticed = false
+
+## Function purpose: resolve the maths font once, at startup, off the render
+## path.
+##
+## Action purpose: `chooseFont` walks five system font trees and reads a MATH
+## table out of every candidate — a cost the GTK thread must not pay when a
+## formula first comes into sight. Idempotent: a second call is the guard.
+proc initMathFont() =
+  if mathFontInitialized: return
+  var (found, chosen) = mathfont.chooseFont()
+  if found:
+    activeChosenFont = chosen
+    cachedMathFamily = chosen.family
+    cachedMathFont = mathfont.buildMathLayoutFont(activeChosenFont)
+  mathFontAvailable = found
+  mathFontInitialized = true
 
 ## Function purpose: return the cached mathtex.MathFont, the family name to
-## draw it in, and whether there is a usable font at all.
+## draw it in, and whether there is a usable font at all. A pure read of what
+## `initMathFont` settled — never a probe, because every caller is drawing.
 proc getActiveMathLayoutFont(): (mathtex.MathFont, string, bool) =
-  if not mathFontInitialized:
-    var (found, chosen) = mathfont.chooseFont()
-    if found:
-      activeChosenFont = chosen
-      cachedMathFamily = chosen.family
-      cachedMathFont = mathfont.buildMathLayoutFont(activeChosenFont)
-    mathFontAvailable = found
-    mathFontInitialized = true
   (cachedMathFont, cachedMathFamily, mathFontAvailable)
 
 ## Function purpose: the laid-out form of one display formula, memoised.
@@ -3681,12 +3687,6 @@ proc mdBlock(app: AppState, b: markdown.Block): Widget =
     # own source until then."
     let layoutRes = if haveFont: mathLayoutFor(b.text, layoutFont) else: nil
     if layoutRes.isNil or not layoutRes.ok:
-      if not haveFont and not mathFontNoticed:
-        # Once per process, and it names the files and the directories rather
-        # than saying maths is unavailable — the same argument the Models
-        # panel's empty state makes about naming what it searched.
-        mathFontNoticed = true
-        app.notice = mathfont.unavailableReason()
       gui:
         Frame:
           style = [StyleClass("code-block")]
@@ -3696,6 +3696,16 @@ proc mdBlock(app: AppState, b: markdown.Block): Widget =
               wrap = true
               xAlign = 0.0
               style = [StyleClass("msg-body")]
+            # Action purpose: a label beside the formula it explains, because
+            # `view` runs on every frame and the notice line is state — writing
+            # it from here is a change made while rendering, and one toast per
+            # formula per redraw. It names the files and the directories.
+            if not haveFont:
+              Label:
+                text = mathfont.unavailableReason()
+                wrap = true
+                xAlign = 0.0
+                style = [StyleClass("dim-note")]
     else:
       let
         reqW = max(24, int(ceil(layoutRes.box.width)) + int(MathPadX * 2.0))
@@ -7288,6 +7298,9 @@ proc run*(withTray = true, checkOnly = false) =
   # and a search path appended later would be too late for the blocks already on
   # screen. Silent on failure by design — see `installScheme`.
   sourceview.installScheme(p.state / "styles")
+  # Before the window exists for the same reason: the probe walks the system
+  # font trees, and the first displayed formula must not pay for it.
+  initMathFont()
   # the clipboard callback is a bare C function and cannot be handed the
   # paths object, so where a pasted image is written is set once, here.
   # The same owned subdirectory the decoder writes to, so pasted images are

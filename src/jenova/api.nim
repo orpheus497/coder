@@ -1316,8 +1316,16 @@ proc handleDb*(req: Request): ApiResult =
     # writes through. Only on an assistant row, which indexes the reply and the
     # turn it answers together — the same rule the window applies, so the two
     # surfaces cannot build different indexes.
-    if r.status == 200 and head == "messages" and node.f("role") == "assistant":
-      indexing: discard rag.indexExchange(node.f "id")
+    #
+    # Action purpose: the role comes from the stored row when the post omits it.
+    # `upsert` merges omitted columns, so an edit to a reply's text carries an id
+    # and a content and the merged row is the only place its role is.
+    if r.status == 200 and head == "messages":
+      let posted = node.f "role"
+      let role = (if posted.len > 0: posted
+                  else: rowFields(e, node.f "id").field("role"))
+      if role == "assistant":
+        indexing: discard rag.indexExchange(node.f "id")
     return r
 
   err(405, "method not allowed")
